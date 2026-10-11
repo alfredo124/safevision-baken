@@ -9,4 +9,5 @@ class Camera(Base):
     laboratory_type = Column(String, nullable=False) # QUIMICA o FISICA
     stream_url = Column(String, nullable=False)
     is_active = Column(Boolean, default=True)
+    overlay_enabled = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)

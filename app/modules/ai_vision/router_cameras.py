@@ -5,7 +5,7 @@ from app.modules.ai_vision import models, schemas
 from app.modules.auth_db.dependencies import get_current_user
 
 # Crear tablas
-Base.metadata.create_all(bind=engine)
+# Base.metadata.create_all(bind=engine)
 
 router = APIRouter(prefix='/modules/ai_vision', tags=['ai_vision'])
 

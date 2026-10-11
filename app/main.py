@@ -1,32 +1,34 @@
 from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
 from app.modules.auth_db.router import router as auth_router
-from app.core.database import SessionLocal
-from app.modules.auth_db.services import log_event
+from app.modules.ai_vision.router import router as ai_vision_router
 
 app = FastAPI(title="SafeVision API")
 
-# Middleware para logging
-@app.middleware("http")
-async def log_requests(request: Request, call_next):
-    response = await call_next(request)
-    
-    # Solo logueamos rutas bajo /modules/
-    if "/modules/" in request.url.path:
-        db = SessionLocal()
-        try:
-            # Por ahora user_id=1 porque aún no tenemos el contexto del usuario en el middleware
-            # En el futuro lo sacaremos del header de autorización
-            log_event(db, user_id=1, action=f"{request.method} {request.url.path}", module="API_GATEWAY")
-        except Exception as e:
-            print(f"Error logueando evento: {e}")
-        finally:
-            db.close()
-            
-    return response
+# Configuración de CORS más permisiva
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
+    allow_headers=["*"],
+    expose_headers=["*"]
+)
 
-# Registrar el router del módulo auth_db
+# Endpoint OPTIONS global para pre-flight
+@app.options("/{rest_of_path:path}")
+async def preflight_handler(rest_of_path: str):
+    return {"status": "ok"}
+
+# Registrar rutas
 app.include_router(auth_router)
+app.include_router(ai_vision_router)
 
 @app.get("/health")
 def health_check():
     return {"status": "ok"}
+
+@app.get("/favicon.ico")
+async def favicon():
+    from fastapi import Response
+    return Response(status_code=204)
