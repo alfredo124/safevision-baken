@@ -11,7 +11,7 @@ SafeVision es un sistema automatizado diseñado para la supervisión y monitoreo
 
 ## Arquitectura Técnica
 - **Backend:** Python + FastAPI (Modular y desacoplado).
-- **Motor de IA:** YOLO11 Nano para la detección de objetos (inferencia de EPP).
+- **Motor de IA:** YOLO con el modelo entrenado `best.pt` para detectar guantes, gafas, bata de laboratorio y personas.
 - **Base de Datos:** SQLAlchemy (SQLite para desarrollo inicial) con persistencia de logs de auditoría.
 - **Seguridad:** Autenticación mediante JWT (JSON Web Tokens).
 - **Frontend:** React + Vite (desplegado en Vercel) para la visualización de resultados e inferencias.
@@ -19,6 +19,7 @@ SafeVision es un sistema automatizado diseñado para la supervisión y monitoreo
 ## Capacidades de Video
 - **Procesamiento de Archivos:** Soporte para carga y análisis de archivos `.mp4`.
 - **Transmisión en Vivo:** Capacidad para procesar flujos de video desde cámaras conectadas al equipo servidor.
+- **Registro desde el frontend:** En Monitoreo se pueden registrar cámaras RTSP/HTTP o cargar videos para reproducirlos como streams procesados. Los videos se guardan en `videos/cameras/` y el límite por archivo es 500 MB.
 
 ## Estructura del Backend (Resumen)
 - `app/main.py`: API Gateway central (gestiona rutas y middleware de logs).
@@ -54,6 +55,7 @@ pip install -r requirements.txt
 ```
 
 > El archivo `requirements.txt` contiene todas las librerías necesarias para ejecutar el backend.
+> El checkpoint entrenado debe estar en la raíz de `safevison_baken` con el nombre `best.pt`.
 
 ## Inicialización de la base de datos
 Si quieres recrear la base de datos con datos semilla:
