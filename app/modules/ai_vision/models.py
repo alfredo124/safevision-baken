@@ -9,7 +9,7 @@ class Camera(Base):
     laboratory_type = Column(String, nullable=False) # QUIMICA o FISICA
     stream_url = Column(String, nullable=False)
     output_stream_url = Column(String, nullable=True)
-    ip_address = Column(String, nullable=True)goo
+    ip_address = Column(String, nullable=True)
     username = Column(String, nullable=True)
     password = Column(String, nullable=True)
     confidence_threshold = Column(Float, nullable=False, default=0.5, server_default='0.5')

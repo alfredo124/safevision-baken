@@ -1,6 +1,7 @@
 from pathlib import Path
 from uuid import uuid4
 
+import cv2
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 from app.core.database import SessionLocal
@@ -13,6 +14,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 VIDEO_UPLOAD_DIR = PROJECT_ROOT / 'videos' / 'cameras'
 MAX_VIDEO_SIZE = 500 * 1024 * 1024
 ALLOWED_VIDEO_EXTENSIONS = {'.mp4', '.avi', '.mov', '.mkv', '.webm'}
+MAX_LOCAL_CAMERA_INDEX = 5
 
 def get_db():
     db = SessionLocal()
@@ -42,6 +44,37 @@ def create_camera(camera: schemas.CameraCreate, db: Session = Depends(get_db), c
     db.commit()
     db.refresh(db_camera)
     return db_camera
+
+
+@router.get('/cameras/available', response_model=list[schemas.AvailableCameraResponse])
+def get_available_cameras(db: Session = Depends(get_db), current_user = Depends(get_current_user)):
+    registered_sources = {
+        camera.stream_url
+        for camera in db.query(models.Camera.stream_url).filter(models.Camera.is_active.is_(True)).all()
+    }
+    available = []
+    for device_index in range(MAX_LOCAL_CAMERA_INDEX + 1):
+        source_url = str(device_index)
+        if source_url in registered_sources:
+            continue
+
+        capture = cv2.VideoCapture(device_index)
+        try:
+            if not capture.isOpened():
+                continue
+            success, _ = capture.read()
+            if not success:
+                continue
+            available.append({
+                'device_index': device_index,
+                'name': f'Cámara conectada {device_index}',
+                'stream_url': source_url,
+                'width': int(capture.get(cv2.CAP_PROP_FRAME_WIDTH)),
+                'height': int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT)),
+            })
+        finally:
+            capture.release()
+    return available
 
 
 @router.post('/cameras/upload', response_model=schemas.CameraResponse, status_code=201)

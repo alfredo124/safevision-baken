@@ -24,3 +24,11 @@ class CameraResponse(CameraBase):
     status: str
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class AvailableCameraResponse(BaseModel):
+    device_index: int
+    name: str
+    stream_url: str
+    width: int
+    height: int
