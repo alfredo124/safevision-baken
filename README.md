@@ -26,6 +26,18 @@ SafeVision es un sistema automatizado diseñado para la supervisión y monitoreo
 - `app/core/`: Configuración global, seguridad (JWT) y conexión a base de datos.
 - `app/modules/`: Lógica de negocio modularizada (auth_db, vision_engine, quimica, fisica).
 
+## Módulo de reglas de laboratorio
+El módulo `app/modules/reglas_lab/` persiste talleres, equipos EPP requeridos, asignaciones a cámaras reales e incidencias. Al iniciar el backend crea las tablas y, solo si aún no existen talleres, carga los talleres iniciales y vincula las cámaras activas según su área (`QUIMICA` o `FISICA`).
+
+Rutas principales, protegidas con JWT:
+- `GET /modules/reglas_lab/configuration`: talleres, catálogo EPP y cámaras disponibles.
+- `POST /modules/reglas_lab/workshops` y `PUT /modules/reglas_lab/workshops/{id}/configuration`: crear talleres y guardar cámaras/EPP requeridos.
+- `POST /modules/reglas_lab/equipment`: ampliar el catálogo EPP (solo administrador).
+- `GET/POST /modules/reglas_lab/incidents`: consultar y registrar incidencias.
+- `PATCH /modules/reglas_lab/incidents/{id}/status`: actualizar su estado.
+
+Las incidencias admiten clase/confianza YOLO y `bounding_box` (`[x1, y1, x2, y2]`) con dimensiones del frame. Estos campos quedan persistidos para que la interfaz pueda recuperar los datos al dibujar cajas propias. Las cámaras con incidencias históricas no se pueden eliminar.
+
 ## Requisitos previos
 Antes de ejecutar el proyecto, asegúrate de tener instalado:
 - Python 3.10 o superior

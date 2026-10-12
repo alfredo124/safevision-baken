@@ -18,19 +18,17 @@ def get_db():
     finally:
         db.close()
 
-def frame_generator(camera):
-    while True:
-        frame_bytes, _ = video_processor.get_frame(
-            camera.id,
-            camera.stream_url,
-            draw_boxes=camera.overlay_enabled,
-            confidence_threshold=camera.confidence_threshold,
-            processing_fps=camera.processing_fps,
-        )
-        if frame_bytes is None:
-            break
-        yield (b'--frame\r\n'
-               b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+def frame_generator(camera_id):
+    sequence = 0
+    try:
+        while True:
+            frame_bytes, _, sequence = video_processor.get_frame(camera_id, after_sequence=sequence)
+            if frame_bytes is None:
+                break
+            yield (b'--frame\r\n'
+                   b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+    finally:
+        video_processor.unsubscribe(camera_id)
 
 def get_camera_for_user(camera_id: int, db: Session, current_user):
     camera = db.query(models.Camera).filter(models.Camera.id == camera_id).first()
@@ -50,9 +48,20 @@ def video_feed(camera_id: int, token: str | None = Query(None), db: Session = De
         raise HTTPException(status_code=401, detail='Autenticación requerida')
     current_user = get_user_from_token(token)
     camera = get_camera_for_user(camera_id, db, current_user)
-    
+
+    try:
+        video_processor.subscribe(
+            camera.id,
+            camera.stream_url,
+            draw_boxes=camera.overlay_enabled,
+            confidence_threshold=camera.confidence_threshold,
+            processing_fps=camera.processing_fps,
+        )
+    except RuntimeError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+
     return StreamingResponse(
-        frame_generator(camera),
+        frame_generator(camera.id),
         media_type='multipart/x-mixed-replace; boundary=frame'
     )
 

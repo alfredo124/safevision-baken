@@ -111,12 +111,18 @@ def delete_camera(
         raise HTTPException(status_code=404, detail='Cámara no encontrada')
 
     authorize_camera_creation(current_user, camera.laboratory_type)
+    from app.modules.reglas_lab.models import Incident, WorkshopCamera
+
+    if db.query(Incident.id).filter_by(camera_id=camera.id).first():
+        raise HTTPException(status_code=409, detail='No se puede eliminar una cámara con incidencias históricas')
+
     stored_video_path = Path(camera.stream_url)
     try:
         stored_video_path.resolve().relative_to(VIDEO_UPLOAD_DIR.resolve())
     except ValueError:
         stored_video_path = None
 
+    db.query(WorkshopCamera).filter_by(camera_id=camera.id).delete(synchronize_session=False)
     video_processor.release_camera(camera.id)
     db.delete(camera)
     db.commit()

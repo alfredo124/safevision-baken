@@ -1,0 +1,1 @@
+"""Laboratory safety rules and incident management."""
