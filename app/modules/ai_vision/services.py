@@ -38,7 +38,7 @@ class CameraStream:
 
 
 class VideoStreamProcessor:
-    def __init__(self, model_path='best.pt', image_size=640, jpeg_quality=75, confidence_floor=0.25):
+    def __init__(self, model_path='best.pt', image_size=512, jpeg_quality=75, confidence_floor=0.25):
         project_root = Path(__file__).resolve().parents[3]
         model_file = Path(model_path)
         if not model_file.is_absolute():
@@ -80,7 +80,7 @@ class VideoStreamProcessor:
                 source_fps=source_fps,
                 draw_boxes=draw_boxes,
                 confidence_threshold=confidence_threshold,
-                processing_fps=max(30, processing_fps),
+                processing_fps=min(2, max(1, processing_fps)),
                 subscribers=1,
             )
             stream.capture_thread = threading.Thread(
@@ -130,18 +130,9 @@ class VideoStreamProcessor:
                 with stream.condition:
                     stream.latest_frame = frame
                     stream.frame_sequence += 1
-                    current_sequence = stream.frame_sequence
-                    if stream.is_file:
-                        stream.condition.wait_for(
-                            lambda: stream.processed_frame_sequence >= current_sequence
-                            or stream.error is not None
-                            or stream.stop_event.is_set()
-                        )
-                        if stream.stop_event.is_set():
-                            break
                     detections = list(stream.detections)
                     detection_age = time.monotonic() - stream.detections_updated_at
-                    if not stream.is_file and detections and detection_age > 1.0:
+                    if detections and detection_age > 1.0:
                         detections = []
                         stream.detections = []
                         self.latest_detections[stream.camera_id] = []
@@ -180,7 +171,7 @@ class VideoStreamProcessor:
     def _inference_loop(self, stream: CameraStream):
         last_frame_sequence = 0
         next_inference_at = 0.0
-        interval = 0 if stream.is_file else 1 / stream.processing_fps
+        interval = 1 / stream.processing_fps
         while not stream.stop_event.is_set():
             with stream.condition:
                 ready = stream.condition.wait_for(
