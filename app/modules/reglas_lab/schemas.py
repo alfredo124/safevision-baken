@@ -144,6 +144,8 @@ class IncidentResponse(BaseModel):
     review_reason: str | None = None
     action_taken: ReviewAction | None = None
     faults: list[IncidentFaultResponse] = Field(default_factory=list)
+    pending_seconds: int | None = None  # solo para alertas pendientes
+    escalated: bool = False  # pendiente más tiempo del permitido: se avisa al administrador
 
 class MonitoringStart(BaseModel):
     # Fase de prueba: borrar antes las incidencias del taller (solo administrador).

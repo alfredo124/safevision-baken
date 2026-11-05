@@ -52,6 +52,9 @@ python tools/aplicar_reglamento.py quimica-v3.1 --taller 2 --confirmar
 - Cada falta confirmada por el motor crea una incidencia `PENDIENTE` del sistema, con el código de regla vigente y una captura en `capturas/` (ignorada por Git) con la cabeza de **todas** las personas cubierta. El video no se graba: solo se escribe esa captura.
 - `GET /modules/reglas_lab/incidents/{id}/capture`: la captura, solo para quien puede ver ese taller.
 - Las reglas se leen al iniciar el monitoreo; si se cambian, detener e iniciar de nuevo.
+- Si una alerta sigue pendiente más de `SAFEVISION_ESCALAR_MIN` minutos (por defecto 5), se marca para el administrador; nunca se confirma sola.
+- Las cámaras en vivo (webcam, RTSP) se reconectan solas hasta 2 minutos; durante el corte no se analiza ni se generan alertas.
+- `SAFEVISION_CAPTURE_DIR` cambia la carpeta de capturas. **Al probar con una copia de la base, usa siempre otra carpeta**: borrar o descartar en la copia borraría las capturas reales.
 - **Fase de prueba:** al iniciar, el administrador puede marcar "Borrar incidencias anteriores de este taller" (`clear_previous`), que elimina sus incidencias, faltas y capturas. Para la versión final, desactivarlo con la variable de entorno `SAFEVISION_MODO_PRUEBA=0`.
 
 Las incidencias admiten clase/confianza YOLO y `bounding_box` (`[x1, y1, x2, y2]`) con dimensiones del frame. Estos campos quedan persistidos para que la interfaz pueda recuperar los datos al dibujar cajas propias. Las cámaras con incidencias históricas no se pueden eliminar.

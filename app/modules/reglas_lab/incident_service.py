@@ -189,6 +189,16 @@ def record_system_fault(
 create_system_incident = record_system_fault
 
 
+def escalation_seconds() -> float:
+    """Tras este tiempo sin respuesta, una alerta pendiente se avisa al administrador.
+    Nunca se confirma sola. SAFEVISION_ESCALAR_MIN (minutos, por defecto 5)."""
+    import os
+    try:
+        return max(0.0, float(os.environ.get('SAFEVISION_ESCALAR_MIN', '5')) * 60)
+    except ValueError:
+        return 300.0
+
+
 def test_mode_enabled() -> bool:
     """Fase de prueba: permite borrar incidencias de prueba. SAFEVISION_MODO_PRUEBA=0 lo desactiva."""
     import os

@@ -148,7 +148,16 @@ def _incident_response(incident, workshop_name: str, camera_name: str, equipment
         'review_reason': incident.review_reason,
         'action_taken': incident.action_taken,
         'faults': faults or [],
+        **_escalation(incident),
     }
+
+
+def _escalation(incident) -> dict:
+    from app.modules.reglas_lab.incident_service import escalation_seconds
+    if incident.status not in ('PENDIENTE', 'EN_REVISION') or incident.occurred_at is None:
+        return {'pending_seconds': None, 'escalated': False}
+    waited = (datetime.now(timezone.utc) - _as_utc(incident.occurred_at)).total_seconds()
+    return {'pending_seconds': int(waited), 'escalated': waited >= escalation_seconds()}
 
 
 @router.get('/configuration', response_model=schemas.RulesConfigurationResponse)

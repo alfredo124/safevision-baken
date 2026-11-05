@@ -128,7 +128,9 @@ async def websocket_detections(websocket: WebSocket, camera_id: int):
             meta = {'sync': not live}
             if status:
                 meta.update(sync_delay=0.0 if live else status['sync_delay'], analysis_rate=status['analysis_rate'],
-                            started_at=status['started_at'])
+                            started_at=status['started_at'], reconnecting=status.get('reconnecting', False))
+            if status and status.get('reconnecting'):
+                overlay = None  # sin señal: no se muestran recuadros antiguos
             if overlay is not None and overlay.get('analysis_id') != last_sent:
                 await websocket.send_text(json.dumps({**overlay, **meta}))
                 last_sent, idle_since = overlay.get('analysis_id'), now

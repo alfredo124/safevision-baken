@@ -28,6 +28,11 @@ MAX_PROCESSING_FPS = 2.0
 # que tarda el análisis, para que cada recuadro coincida con el frame analizado.
 MAX_SYNC_DELAY = 4.0
 
+# Reconexión de cámaras en vivo (webcam, RTSP): esperas crecientes hasta este total.
+RECONNECT_MAX_SECONDS = 120.0
+RECONNECT_MAX_WAIT = 10.0
+RECONNECT_FIRST_WAIT = 1.0
+
 # Callback de incidencias: (camera_id, evento, frame, observación) -> None
 EventHandler = Callable[[int, object, object, object], None]
 
@@ -68,6 +73,7 @@ class CameraStream:
     sync_delay: float = 0.0
     jpeg_buffer: deque = field(default_factory=deque)  # (ts, jpeg) solo en memoria
     live_jpeg: bytes | None = None  # sin retraso, para el modo "en vivo"
+    reconnecting: bool = False
     live_sequence: int = 0
     subscriptions: set = field(default_factory=set)
     monitor: MonitorState | None = None
@@ -269,6 +275,7 @@ class VideoStreamProcessor:
             'events': monitor.events,
             'viewers': sum(not t.startswith('monitor-') for t in stream.subscriptions),
             'started_at': monitor.started_at,
+            'reconnecting': stream.reconnecting,
             # Para la barra de sincronización del frontend.
             'sync_delay': round(stream.sync_delay, 2),
             'analysis_rate': round(monitor.analyses / max(1.0, time.time() - monitor.started_at), 2),
@@ -303,6 +310,9 @@ class VideoStreamProcessor:
                 if not success:
                     if stream.is_file and not stream.stop_event.is_set():
                         stream.capture.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                        next_frame_at = time.monotonic()
+                        continue
+                    if self._reconnect(stream):
                         next_frame_at = time.monotonic()
                         continue
                     logger.warning('La captura de cámara %s terminó sin frames.', stream.camera_id)
@@ -345,6 +355,36 @@ class VideoStreamProcessor:
             stream.capture.release()
             stream.stop_event.set()
             with stream.condition:
+                stream.condition.notify_all()
+
+    def _reconnect(self, stream: CameraStream) -> bool:
+        """Reabre una cámara en vivo que dejó de dar imagen. Durante el corte no se analiza,
+        así que no se generan faltas: el motor solo recibe frames reales."""
+        with stream.condition:
+            stream.reconnecting = True
+            stream.condition.notify_all()
+        logger.warning('Cámara %s sin señal: reconectando.', stream.camera_id)
+        stream.capture.release()
+        started, wait = time.monotonic(), RECONNECT_FIRST_WAIT
+        try:
+            while not stream.stop_event.is_set() and time.monotonic() - started < RECONNECT_MAX_SECONDS:
+                if stream.stop_event.wait(wait):
+                    return False
+                wait = min(RECONNECT_MAX_WAIT, wait * 2)
+                try:
+                    capture, _ = self._capture_factory(stream.stream_url)
+                except Exception:
+                    continue
+                if capture.isOpened():
+                    capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                    stream.capture = capture
+                    logger.info('Cámara %s reconectada.', stream.camera_id)
+                    return True
+                capture.release()
+            return False
+        finally:
+            with stream.condition:
+                stream.reconnecting = False
                 stream.condition.notify_all()
 
     def _inference_loop(self, stream: CameraStream):

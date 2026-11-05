@@ -130,3 +130,40 @@ class ReviewTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class EscalationTest(unittest.TestCase):
+    def test_old_pending_alert_is_escalated_but_never_auto_confirmed(self):
+        import os
+        from datetime import datetime, timedelta, timezone
+        from unittest import mock
+        client = TestClient(app)
+        client.__enter__()
+        from tools.create_admin import create_admin
+        create_admin('admin_test', 'admin-pass', 'Admin Pruebas')
+        admin = headers('admin_test', 'ADMINISTRADOR')
+        with database.SessionLocal() as db:
+            camera = Camera(name='Cam escalado', laboratory_type='QUIMICA', stream_url=tempfile.mktemp())
+            workshop = models.Workshop(name=f'Química escalado {tempfile.mktemp()[-6:]}', laboratory_type='QUIMICA')
+            db.add_all([camera, workshop])
+            db.flush()
+            old = models.Incident(code=f'INC-OLD-{tempfile.mktemp()[-6:]}', workshop_id=workshop.id, camera_id=camera.id,
+                                  title='t', description='d', severity='ALTO',
+                                  occurred_at=datetime.now(timezone.utc) - timedelta(minutes=6))
+            new = models.Incident(code=f'INC-NEW-{tempfile.mktemp()[-6:]}', workshop_id=workshop.id, camera_id=camera.id,
+                                  title='t', description='d', severity='ALTO')
+            db.add_all([old, new])
+            db.commit()
+            old_id, new_id = old.id, new.id
+        items = {item['id']: item for item in client.get(f'{BASE}/incidents', headers=admin).json()}
+        self.assertTrue(items[old_id]['escalated'])
+        self.assertEqual(items[old_id]['status'], 'PENDIENTE')  # nunca se confirma sola
+        self.assertGreaterEqual(items[old_id]['pending_seconds'], 360)
+        self.assertFalse(items[new_id]['escalated'])
+        with mock.patch.dict(os.environ, {'SAFEVISION_ESCALAR_MIN': '10'}):
+            items = {item['id']: item for item in client.get(f'{BASE}/incidents', headers=admin).json()}
+            self.assertFalse(items[old_id]['escalated'])
+        client.post(f'{BASE}/incidents/{old_id}/review', json={'decision': 'DESCARTADA'}, headers=admin)
+        items = {item['id']: item for item in client.get(f'{BASE}/incidents', headers=admin).json()}
+        self.assertFalse(items[old_id]['escalated'])
+        client.__exit__(None, None, None)

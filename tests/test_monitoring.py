@@ -5,6 +5,7 @@ import tempfile
 import threading
 import time
 import unittest
+import unittest.mock
 from pathlib import Path
 
 import cv2
@@ -260,3 +261,67 @@ class IncidentTimezoneTest(unittest.TestCase):
         naive = datetime(2026, 11, 5, 13, 0, 0)
         self.assertEqual(_as_utc(naive).tzinfo, timezone.utc)
         self.assertEqual(_as_utc(naive).isoformat(), '2026-11-05T13:00:00+00:00')
+
+
+class ReconnectTest(unittest.TestCase):
+    def test_live_camera_reconnects_without_analysing_during_outage(self):
+        from app.modules.ai_vision import services
+
+        class DroppingCapture(FakeCapture):
+            def __init__(self, reads_before_drop):
+                super().__init__()
+                self.left = reads_before_drop
+
+            def read(self):
+                time.sleep(0.02)
+                if self.left is not None:
+                    self.left -= 1
+                    if self.left < 0:
+                        return False, None  # la cámara deja de dar imagen
+                return True, self.frame.copy()
+
+        class Closed(FakeCapture):
+            def isOpened(self):
+                return False
+
+        opens = []
+
+        def factory(url):
+            opens.append(time.monotonic())
+            if len(opens) == 1:
+                return DroppingCapture(reads_before_drop=40), False
+            if len(opens) <= 3:
+                return Closed(), False  # dos reintentos fallidos
+            return DroppingCapture(reads_before_drop=None), False
+
+        processor = VideoStreamProcessor(capture_factory=factory, pipeline_factory=FakePipeline)
+        with unittest.mock.patch.object(services, 'RECONNECT_MAX_WAIT', 0.2),                 unittest.mock.patch.object(services, 'RECONNECT_FIRST_WAIT', 2.5):
+            processor.start_monitoring(1, 'webcam', [models_rule('guantes', 'manos', 'gloves')], lambda *a: None,
+                                       config=FAST)
+            self.assertTrue(wait_until(lambda: processor.streams[1].reconnecting, timeout=5))
+            self.assertTrue(processor.monitoring_status(1)['reconnecting'])
+            # Puede analizarse una vez el último frame real previo al corte (intervalo 0.5 s).
+            time.sleep(0.8)
+            during = processor.streams[1].inference_count
+            time.sleep(1.0)  # el primer reintento espera 2.5 s: seguimos sin señal
+            self.assertTrue(processor.streams[1].reconnecting)
+            self.assertEqual(processor.streams[1].inference_count, during, 'Sin análisis durante el corte')
+            self.assertTrue(wait_until(lambda: not processor.streams[1].reconnecting, timeout=10))
+            self.assertTrue(wait_until(lambda: processor.streams[1].inference_count > during + 1, timeout=5),
+                            'Tras reconectar sigue analizando')
+            self.assertGreaterEqual(len(opens), 4)
+            self.assertIsNone(processor.streams[1].error)
+            processor.stop_monitoring(1)
+
+
+class CaptureDirTest(unittest.TestCase):
+    def test_capture_dir_can_be_changed_by_environment(self):
+        import importlib
+        import os
+        from app.modules.ai_vision import capture as capture_module
+        other = tempfile.mkdtemp(prefix='safevision-tests-otra-')
+        with unittest.mock.patch.dict(os.environ, {'SAFEVISION_CAPTURE_DIR': other}):
+            reloaded = importlib.reload(capture_module)
+            self.assertEqual(reloaded.CAPTURE_DIR, Path(other))
+        importlib.reload(capture_module)
+        shutil.rmtree(other, ignore_errors=True)
