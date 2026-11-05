@@ -1,3 +1,4 @@
+import tests  # noqa: F401  Primero: BD y capturas temporales (nunca las reales), se ejecute como se ejecute.
 import json
 import random
 import subprocess

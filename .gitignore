@@ -29,3 +29,8 @@ venv/
 
 # Modelos descargables automáticamente por Ultralytics (best.pt sí se versiona)
 yolo11n-pose.pt
+
+# Certificados HTTPS locales (contienen claves privadas)
+/certs/
+*.key
+*.pem

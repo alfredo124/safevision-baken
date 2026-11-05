@@ -2,6 +2,7 @@ from datetime import date, datetime, time, timezone
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -125,9 +126,9 @@ def _incident_response(incident, workshop_name: str, camera_name: str, equipment
         'id': incident.id,
         'code': incident.code,
         'workshop_id': incident.workshop_id,
-        'workshop_name': workshop_name,
+        'workshop_name': incident.workshop_name or workshop_name or f'Taller {incident.workshop_id}',
         'camera_id': incident.camera_id,
-        'camera_name': camera_name,
+        'camera_name': incident.camera_name or camera_name or f'Cámara {incident.camera_id}',
         'equipment_id': incident.equipment_id,
         'equipment_name': equipment_name,
         'title': incident.title,
@@ -260,6 +261,9 @@ def update_workshop_configuration(
     if known_equipment != equipment_ids:
         raise HTTPException(status_code=400, detail='Uno o más equipos de seguridad no existen o están inactivos')
 
+    previous_camera_ids = {
+        row.camera_id for row in db.query(models.WorkshopCamera.camera_id).filter_by(workshop_id=workshop_id).all()
+    }
     try:
         db.query(models.WorkshopCamera).filter_by(workshop_id=workshop_id).delete(synchronize_session=False)
         db.query(models.WorkshopEquipmentRule).filter_by(workshop_id=workshop_id).delete(synchronize_session=False)
@@ -277,6 +281,9 @@ def update_workshop_configuration(
         db.rollback()
         raise HTTPException(status_code=409, detail='No se pudo guardar la asignación de cámaras') from error
 
+    # Con la práctica en curso, el análisis sigue la configuración nueva sin reiniciar la práctica.
+    from app.modules.reglas_lab import monitoring
+    monitoring.sync_workshop(db, workshop_id, previous_camera_ids)
     db.refresh(workshop)
     return _workshop_response(db, workshop)
 
@@ -312,14 +319,14 @@ def list_incidents(
 ):
     query = (
         db.query(models.Incident, models.Workshop.name, Camera.name, models.SafetyEquipment.name, User.full_name)
-        .join(models.Workshop, models.Workshop.id == models.Incident.workshop_id)
-        .join(Camera, Camera.id == models.Incident.camera_id)
+        .outerjoin(models.Workshop, models.Workshop.id == models.Incident.workshop_id)
+        .outerjoin(Camera, Camera.id == models.Incident.camera_id)  # la cámara puede haberse eliminado
         .outerjoin(models.SafetyEquipment, models.SafetyEquipment.id == models.Incident.equipment_id)
         .outerjoin(User, User.id == models.Incident.reviewed_by)
     )
     permitted_area = {'ENCARGADO_QUIMICA': 'QUIMICA', 'ENCARGADO_FISICA': 'FISICA'}.get(_role(current_user))
     if permitted_area:
-        query = query.filter(models.Workshop.laboratory_type == permitted_area)
+        query = query.filter(func.coalesce(models.Incident.laboratory_type, models.Workshop.laboratory_type) == permitted_area)
     if workshop_id is not None:
         query = query.filter(models.Incident.workshop_id == workshop_id)
     if camera_id is not None:
@@ -362,6 +369,9 @@ def create_incident(
         code=f'INC-{datetime.now(timezone.utc):%Y%m%d}-{uuid4().hex[:8].upper()}',
         workshop_id=workshop.id,
         camera_id=payload.camera_id,
+        camera_name=db.query(Camera.name).filter_by(id=payload.camera_id).scalar(),
+        workshop_name=workshop.name,
+        laboratory_type=workshop.laboratory_type,
         equipment_id=payload.equipment_id,
         title=payload.title.strip(),
         description=payload.description.strip(),
@@ -384,7 +394,7 @@ def create_incident(
         'workshop_id': workshop.id,
         'workshop_name': workshop.name,
         'camera_id': payload.camera_id,
-        'camera_name': db.query(Camera.name).filter_by(id=payload.camera_id).scalar(),
+        'camera_name': incident.camera_name,
         'equipment_id': incident.equipment_id,
         'equipment_name': equipment.name if equipment else None,
         'title': incident.title,
@@ -520,7 +530,8 @@ def monitoring_status(workshop_id: int, db: Session = Depends(get_db), current_u
     if not workshop:
         raise HTTPException(status_code=404, detail='Taller no encontrado')
     _ensure_workshop_access(workshop, current_user)
-    return {'workshop_id': workshop_id, 'cameras': monitoring.workshop_status(db, workshop_id)}
+    return {'workshop_id': workshop_id, 'active': monitoring.is_active(workshop_id),
+            'cameras': monitoring.workshop_status(db, workshop_id)}
 
 
 def _serve_capture(db: Session, incident_id: int, current_user, fault_id: int | None = None):

@@ -1,4 +1,5 @@
 """Tarea 1C: estado EN_RIESGO, mensaje de recuadros y WebSocket. Datos simulados."""
+import tests  # noqa: F401  Primero: BD y capturas temporales (nunca las reales), se ejecute como se ejecute.
 import time
 import unittest
 from unittest import mock

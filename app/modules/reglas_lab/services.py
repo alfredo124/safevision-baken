@@ -17,6 +17,23 @@ DEFAULT_EQUIPMENT = [
 ]
 
 
+def snapshot_incident_names(db) -> int:
+    """Incidencias anteriores sin nombres guardados: se copian los actuales (los mejores disponibles)."""
+    from app.modules.ai_vision.models import Camera
+    from app.modules.reglas_lab.models import Incident
+
+    pending = db.query(Incident).filter(Incident.camera_name.is_(None) | Incident.workshop_name.is_(None)).all()
+    for incident in pending:
+        camera = db.query(Camera).filter_by(id=incident.camera_id).first()
+        workshop = db.query(Workshop).filter_by(id=incident.workshop_id).first()
+        incident.camera_name = incident.camera_name or (camera.name if camera else f'Cámara {incident.camera_id}')
+        incident.workshop_name = incident.workshop_name or (workshop.name if workshop else f'Taller {incident.workshop_id}')
+        incident.laboratory_type = incident.laboratory_type or (workshop.laboratory_type if workshop else None)
+    if pending:
+        db.commit()
+    return len(pending)
+
+
 def initialize_reglas_lab() -> None:
     from app.modules.reglas_lab import models  # Register all module tables with shared metadata.
 
@@ -26,8 +43,10 @@ def initialize_reglas_lab() -> None:
         'rule_code': 'VARCHAR(40)', 'capture_path': 'VARCHAR(300)',
         'reviewed_by': 'INTEGER', 'reviewed_at': 'DATETIME', 'review_reason': 'VARCHAR(300)',
         'action_taken': 'VARCHAR(30)', 'track_id': 'INTEGER',
+        'camera_name': 'VARCHAR(120)', 'workshop_name': 'VARCHAR(120)', 'laboratory_type': 'VARCHAR(20)',
     })
     with SessionLocal() as db:
+        snapshot_incident_names(db)
         # Solo se añaden los equipos que faltan; los existentes no se modifican.
         existing = {row.id for row in db.query(SafetyEquipment.id).all()}
         missing = [equipment for equipment in DEFAULT_EQUIPMENT if equipment['id'] not in existing]

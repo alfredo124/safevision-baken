@@ -4,8 +4,10 @@ cd /d "%~dp0"
 if exist .venv\Scripts\activate.bat call .venv\Scripts\activate.bat
 
 rem --- Configuración opcional (quita "rem" para usarla) ---
-rem Análisis por segundo y cámara (2 por defecto; con GPU, 4 o 5):
+rem Análisis por segundo y cámara. Sin definir es automático (se mide el PC); un número lo fija:
 rem set SAFEVISION_MAX_FPS=4
+rem Tamaño de imagen para YOLO (640 por defecto; 480 analiza ~1.8 veces más rápido en CPU):
+rem set SAFEVISION_IMGSZ=480
 rem Minutos sin respuesta antes de avisar al administrador:
 rem set SAFEVISION_ESCALAR_MIN=5
 rem Versión final: desactiva el borrado de incidencias de prueba:

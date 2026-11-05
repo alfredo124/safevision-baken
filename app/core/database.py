@@ -47,6 +47,7 @@ def ensure_camera_schema():
         'processing_fps': 'INTEGER NOT NULL DEFAULT 10',
         'status': "VARCHAR NOT NULL DEFAULT 'offline'",
         'updated_at': 'DATETIME',
+        'source_type': "VARCHAR NOT NULL DEFAULT 'STREAM'",
     }
     with engine.begin() as connection:
         connection.execute(text(

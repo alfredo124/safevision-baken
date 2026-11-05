@@ -1,5 +1,6 @@
 """Tarea 2 (y partes de 0B): monitoreo sin espectadores, incidencias con captura,
 suscripciones por identificador. Cámara y detectores simulados; SQLite temporal."""
+import tests  # noqa: F401  Primero: BD y capturas temporales (nunca las reales), se ejecute como se ejecute.
 import shutil
 import tempfile
 import threading

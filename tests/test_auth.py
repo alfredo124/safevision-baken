@@ -1,4 +1,5 @@
 """Permisos de los endpoints de usuarios (Tarea 0). Usa una SQLite temporal."""
+import tests  # noqa: F401  Primero: BD y capturas temporales (nunca las reales), se ejecute como se ejecute.
 import os
 import unittest
 

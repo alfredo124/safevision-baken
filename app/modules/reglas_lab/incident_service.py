@@ -12,6 +12,7 @@ from uuid import uuid4
 
 from sqlalchemy.orm import Session
 
+from app.core import events
 from app.modules.ai_vision.models import Camera
 from app.modules.reglas_lab import models
 from app.modules.reglas_lab.compliance import EquipmentRule, ViolationEvent
@@ -141,10 +142,15 @@ def record_system_fault(
         return incident  # esa falta ya está en la alerta
 
     if incident is None:
+        camera = db.query(Camera).filter_by(id=camera_id).first()
+        workshop = db.query(models.Workshop).filter_by(id=workshop_id).first()
         incident = models.Incident(
             code=new_incident_code(now),
             workshop_id=workshop_id,
             camera_id=camera_id,
+            camera_name=camera.name if camera else None,
+            workshop_name=workshop.name if workshop else None,
+            laboratory_type=workshop.laboratory_type if workshop else None,
             equipment_id=equipment.id if equipment else None,
             title='-', description='-',
             severity=event.severity,
@@ -182,6 +188,7 @@ def record_system_fault(
     _refresh_summary(db, incident)
     db.commit()
     db.refresh(incident)
+    events.notify('incidents')  # las alertas aparecen al instante en todas las pantallas
     return incident
 
 

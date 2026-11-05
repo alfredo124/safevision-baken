@@ -1,4 +1,5 @@
 """Varias faltas de la misma persona en poco tiempo forman una sola alerta con varias evidencias."""
+import tests  # noqa: F401  Primero: BD y capturas temporales (nunca las reales), se ejecute como se ejecute.
 import shutil
 import tempfile
 import unittest

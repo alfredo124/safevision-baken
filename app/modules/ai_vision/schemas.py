@@ -19,6 +19,8 @@ class CameraCreate(CameraBase):
 
 class CameraResponse(CameraBase):
     id: int
+    source_type: Literal['STREAM', 'BROWSER'] = 'STREAM'
+    station_connected: bool = False  # cámara de navegador que ya transmite una estación
     created_at: datetime
     updated_at: datetime
     status: str
@@ -32,3 +34,8 @@ class AvailableCameraResponse(BaseModel):
     stream_url: str
     width: int
     height: int
+
+
+class BrowserCameraCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    laboratory_type: Literal['QUIMICA', 'FISICA']

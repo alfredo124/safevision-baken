@@ -1,4 +1,5 @@
 """Tarea 0B: varios clientes, miniaturas por imagen suelta, permisos por rol y CORS."""
+import tests  # noqa: F401  Primero: BD y capturas temporales (nunca las reales), se ejecute como se ejecute.
 import time
 import unittest
 from unittest import mock
@@ -151,3 +152,15 @@ class PortabilityTest(unittest.TestCase):
             self.assertEqual(services._max_fps_from_env(), 5.0)
         with mock.patch.dict(os.environ, {'SAFEVISION_MAX_FPS': 'abc'}):
             self.assertEqual(services._max_fps_from_env(), 2.0)
+
+    def test_image_size_from_environment(self):
+        import os
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop('SAFEVISION_IMGSZ', None)
+            self.assertEqual(services._image_size_from_env(), 640, 'Por defecto no cambia')
+            self.assertEqual(services.VideoStreamProcessor().image_size, 640)
+        for value, expected in (('480', 480), ('500', 512), ('abc', 640), ('64', 320)):
+            with mock.patch.dict(os.environ, {'SAFEVISION_IMGSZ': value}):
+                self.assertEqual(services._image_size_from_env(), expected, value)
+        with mock.patch.dict(os.environ, {'SAFEVISION_IMGSZ': '480'}):
+            self.assertEqual(services.VideoStreamProcessor().image_size, 480)

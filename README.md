@@ -36,15 +36,66 @@ C:\git\universidad\
 La primera vez que se inicia una práctica, Ultralytics descarga `yolo11n-pose.pt` (6 MB).
 
 ### 4. Usarlo desde otros equipos o el celular (misma red)
-- En el PC servidor, **PowerShell como administrador**, una sola vez:
-  ```powershell
-  New-NetFirewallRule -DisplayName "SafeVision" -Direction Inbound -Protocol TCP -LocalPort 8000,5173 -Action Allow -Profile Private,Public
-  ```
-- Los demás equipos abren la dirección *Network* que muestra `iniciar.bat` del frontend, por ejemplo
-  `http://192.168.1.9:5173`. La web encuentra sola el backend en la misma IP, puerto 8000.
-- Funciona igual con el punto de acceso de un celular, incluso sin internet. Si los equipos no se ven entre sí,
-  desactiva el *aislamiento de clientes* del punto de acceso.
-- La **cámara del navegador** de otro equipo o del celular necesita HTTPS (Tarea 0C, en preparación).
+Todos los equipos (el PC servidor, otros PC y los celulares) deben estar en **la misma red**. Hay dos casos:
+
+| | Caso A: Wi-Fi de casa o del laboratorio | Caso B: datos compartidos del celular |
+|---|---|---|
+| Cómo | El PC (por Wi-Fi o cable) y los celulares en el mismo router | Un celular activa *Punto de acceso / Compartir internet*; el PC y los demás se conectan a ese Wi-Fi |
+| IP típica del PC | `192.168.1.x`, `192.168.0.x` o `10.x.x.x` | Android: `192.168.43.x` u otra `192.168.x.x` (p. ej. `192.168.158.129`); iPhone: `172.20.10.x` |
+| Cuándo usarlo | En casa | Cuando el Wi-Fi no deja que los equipos se vean (frecuente en redes de universidad) o no hay Wi-Fi |
+
+**Qué IP usar (la del PC servidor):**
+1. En el PC servidor abre PowerShell y escribe `ipconfig`.
+2. Busca el adaptador **conectado a esa red**: *Adaptador de LAN inalámbrica Wi-Fi* (o *Ethernet* si va por cable)
+   y copia su **Dirección IPv4**. También la muestra `iniciar.bat` del frontend en la línea *Network*.
+3. No uses `127.0.0.1` (solo sirve en el propio PC), ni `169.254.x.x` (sin red), ni las de adaptadores virtuales
+   (*vEthernet*, *VirtualBox*, *WSL*).
+4. En los demás equipos abre `http://ESA-IP:5173` (o `https://ESA-IP:5173` con HTTPS, sección 4b). La web encuentra
+   sola el backend en la misma IP, puerto 8000.
+
+**Una sola vez por PC servidor**, en PowerShell como administrador (abre los puertos también en redes "públicas",
+que es como Windows suele clasificar el punto de acceso de un celular):
+```powershell
+New-NetFirewallRule -DisplayName "SafeVision" -Direction Inbound -Protocol TCP -LocalPort 8000,5173 -Action Allow -Profile Private,Public
+```
+
+**Al cambiar de red** (de A a B o al revés) la IP cambia: cierra las ventanas del backend y del frontend y vuelve a
+abrir los `.bat` (primero el backend). Con HTTPS el certificado se renueva solo (sección 4b).
+
+Notas del caso B:
+- El video entre los equipos va por la red local del celular, no por internet: SafeVision no gasta datos móviles.
+  Los equipos conectados sí pueden gastarlos en otras cosas (actualizaciones, otras apps). Algunos celulares
+  exigen tener los datos activos para encender el punto de acceso.
+- Si los equipos no se ven entre sí, desactiva el *aislamiento de clientes* del punto de acceso (si la opción
+  existe) o prueba con otro celular.
+- El celular que comparte la red también puede usar SafeVision o ser la cámara; se calienta y gasta batería:
+  mejor conectado al cargador.
+
+La **cámara del navegador** de otro equipo o del celular necesita HTTPS: ver la sección siguiente.
+
+### 4b. Usar la cámara del celular u otro equipo (HTTPS)
+El navegador solo permite usar la cámara con HTTPS (o en `localhost`). Para la red local:
+1. Arranca con HTTPS: `safevison_baken\iniciar_https.bat` y después `safevision-web\iniciar_https.bat`.
+   La primera vez se crea el certificado en `safevison_baken\certs\` (fuera de Git; contiene claves privadas).
+2. En el celular abre la IP del PC servidor (sección 4) con **https**, por ejemplo `https://192.168.1.9:5173`.
+3. El navegador avisará de que la conexión no es privada. Dos opciones:
+   - **Rápida:** acepta la advertencia en `https://IP:5173` y también una vez en `https://IP:8000/health`
+     (el backend es otra dirección y también hay que aceptarla).
+   - **Sin advertencias:** descarga `https://IP:8000/certificado` (o copia `certs\ca.crt`) e instálalo como
+     certificado de autoridad. Android: *Ajustes → Seguridad → Cifrado y credenciales → Instalar certificado → CA*.
+     iPhone: abrir el archivo, instalar el perfil en *Ajustes* y activarlo en
+     *General → Información → Ajustes de confianza de certificados*.
+4. Entra en **Estación de cámara**, crea una "cámara de navegador", elige la cámara del dispositivo y pulsa
+   *Iniciar transmisión*. La vista local va a la velocidad de la cámara; al servidor solo se envían 2-5 imágenes
+   por segundo. Asigna esa cámara a un taller en *Configuración de reglas* para analizarla en la práctica.
+5. La transmisión **sigue aunque vayas a Monitoreo u otra página** del mismo navegador: arriba se ve una barra
+   verde con el botón *Detener*. Se corta al pulsar *Detener*, cerrar sesión o cerrar/recargar la página.
+   Mantén el navegador abierto y la pantalla encendida: en segundo plano puede dejar de enviar. Si la estación se
+   corta, la cámara queda "sin señal", no se analiza ni genera alertas, y se reconecta sola.
+
+Si cambias de red (otro Wi-Fi o los datos del celular), cierra y vuelve a abrir `iniciar_https.bat` del backend y
+después el del frontend: el backend detecta la IP nueva y renueva el certificado con la autoridad de siempre
+(no hay que reinstalarla en el celular). Las IP anteriores se conservan, así que volver a la red de antes no lo renueva.
 
 ### 5. Primeros pasos en la aplicación
 1. **Monitoreo → Agregar nueva cámara**: carga un video `.mp4` o indica una URL RTSP. Los videos se guardan en
@@ -52,21 +103,31 @@ La primera vez que se inicia una práctica, Ultralytics descarga `yolo11n-pose.p
 2. **Configuración de reglas**: elige el taller, asígnale la cámara y marca los EPP (guantes, lentes, bata).
    Para usar los códigos del reglamento de Química, con el backend detenido y el `.venv` activado:
    `python tools\aplicar_reglamento.py quimica-v3.1 --taller 2 --confirmar`.
-3. Pulsa **Iniciar práctica**. Las alertas aparecen abajo a la derecha, en cualquier página.
+3. Pulsa **Iniciar práctica**. Las alertas aparecen en cualquier página: abajo a la derecha en el PC y, en el celular, como una barra plegable bajo la cabecera.
 
 ### Configuración opcional
 Las variables están documentadas en `.env.example` y se activan quitando `rem` en `iniciar.bat`. Las más útiles:
-- `SAFEVISION_MAX_FPS`: análisis por segundo y cámara (2 por defecto; con GPU, 4 o 5).
+- `SAFEVISION_MAX_FPS`: análisis por segundo y cámara. **Sin definir, es automático**: al iniciar la primera
+  práctica se cronometra el análisis en ese PC (2 en un PC lento, 3-4 con una CPU potente, 5 con GPU). El equipo
+  detectado y el límite se ven en el control de práctica. Pon un número solo para fijarlo a mano.
+- `SAFEVISION_IMGSZ`: tamaño de imagen para YOLO (640 por defecto). Con `480` analiza ~1,8 veces más rápido
+  en CPU; en la prueba con videos detectó 52 EPP frente a 55 con 640 (75 imágenes). Se decide con el video de calibración.
 - `SAFEVISION_ESCALAR_MIN`: minutos sin respuesta antes de avisar al administrador (5 por defecto).
 - `SAFEVISION_MODO_PRUEBA=0`: versión final, no permite borrar incidencias.
+
+### Rendimiento: por qué una cámara va lenta
+El PC reparte su CPU entre **todas las cámaras del taller en práctica**. Medido con YOLO real en un PC de
+2 núcleos sin GPU: 1 cámara ≈ 1,8 análisis por segundo; 4 cámaras ≈ 0,6 cada una. Para que los recuadros
+se actualicen más rápido: asigna al taller solo las cámaras que se usan, prueba `SAFEVISION_IMGSZ=480` o usa
+un PC más potente o con GPU. La vista previa del celular siempre va fluida: no pasa por el servidor.
 
 ### PC con GPU NVIDIA (opcional, mucho más rápido)
 `requirements.txt` instala PyTorch para CPU. Con una GPU NVIDIA y el `.venv` activado:
 ```powershell
 python -m pip install --force-reinstall torch torchvision --index-url https://download.pytorch.org/whl/cu128
 ```
-Elige la versión de CUDA en https://pytorch.org. Ultralytics usa la GPU automáticamente; después sube
-`SAFEVISION_MAX_FPS`.
+Elige la versión de CUDA en https://pytorch.org. Ultralytics usa la GPU automáticamente y SafeVision sube solo el
+límite de análisis. Si el PC tiene GPU NVIDIA pero PyTorch es el de CPU, el control de práctica lo avisa.
 
 ### Lo que no está en Git, y por qué
 - `safevision.db` (base local), `capturas\`, `videos\`, `grabaciones\` y `yolo11n-pose.pt`: son datos locales,

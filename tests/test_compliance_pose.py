@@ -1,4 +1,5 @@
 """Motor con puntos clave de pose (Tarea 1B). Datos simulados, sin YOLO."""
+import tests  # noqa: F401  Primero: BD y capturas temporales (nunca las reales), se ejecute como se ejecute.
 import unittest
 
 from app.modules.reglas_lab.compliance import (

@@ -46,6 +46,28 @@ def create_camera(camera: schemas.CameraCreate, db: Session = Depends(get_db), c
     return db_camera
 
 
+@router.post('/cameras/browser', response_model=schemas.CameraResponse, status_code=201)
+def create_browser_camera(
+    payload: schemas.BrowserCameraCreate,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Cámara alimentada por una "estación de cámara" del navegador (celular o laptop)."""
+    from app.modules.ai_vision.browser_ingest import BROWSER_PREFIX
+    authorize_camera_creation(current_user, payload.laboratory_type)
+    camera = models.Camera(
+        name=payload.name.strip(),
+        laboratory_type=payload.laboratory_type,
+        stream_url=f'{BROWSER_PREFIX}{uuid4().hex}',
+        source_type='BROWSER',
+        status='offline',
+    )
+    db.add(camera)
+    db.commit()
+    db.refresh(camera)
+    return camera
+
+
 @router.get('/cameras/available', response_model=list[schemas.AvailableCameraResponse])
 def get_available_cameras(db: Session = Depends(get_db), current_user = Depends(get_current_user)):
     registered_sources = {
@@ -133,21 +155,46 @@ async def create_camera_with_video(
     return db_camera
 
 
+def remove_video_file(path: Path, db: Session) -> None:
+    """Borra el video subido de una cámara eliminada. Si otra cámara activa usa el mismo archivo, se deja.
+    En Windows el archivo puede seguir abierto unos segundos por la captura que se está cerrando: se
+    reintenta en segundo plano en vez de responder con error (la cámara ya quedó eliminada)."""
+    import logging
+    import threading
+    import time
+
+    if db.query(models.Camera.id).filter(models.Camera.stream_url == str(path), models.Camera.is_active.is_(True)).first():
+        return
+
+    def attempt():
+        for _ in range(20):
+            try:
+                path.unlink(missing_ok=True)
+                return
+            except PermissionError:
+                time.sleep(0.5)
+        logging.getLogger(__name__).warning('No se pudo borrar el video %s (sigue en uso)', path)
+
+    try:
+        path.unlink(missing_ok=True)
+    except PermissionError:
+        threading.Thread(target=attempt, daemon=True).start()
+
+
 @router.delete('/cameras/{camera_id}', status_code=204)
 def delete_camera(
     camera_id: int,
     db: Session = Depends(get_db),
     current_user = Depends(get_current_user),
 ):
-    camera = db.query(models.Camera).filter(models.Camera.id == camera_id).first()
+    camera = db.query(models.Camera).filter(models.Camera.id == camera_id, models.Camera.is_active.is_(True)).first()
     if not camera:
         raise HTTPException(status_code=404, detail='Cámara no encontrada')
 
     authorize_camera_creation(current_user, camera.laboratory_type)
     from app.modules.reglas_lab.models import Incident, WorkshopCamera
 
-    if db.query(Incident.id).filter_by(camera_id=camera.id).first():
-        raise HTTPException(status_code=409, detail='No se puede eliminar una cámara con incidencias históricas')
+    has_history = db.query(Incident.id).filter_by(camera_id=camera.id).first() is not None
 
     stored_video_path = Path(camera.stream_url)
     try:
@@ -157,7 +204,16 @@ def delete_camera(
 
     db.query(WorkshopCamera).filter_by(camera_id=camera.id).delete(synchronize_session=False)
     video_processor.release_camera(camera.id)
-    db.delete(camera)
+    if has_history:
+        # El historial conserva sus propios datos (nombre, taller, laboratorio). De la cámara se borra la
+        # fuente y las credenciales; solo queda una fila oculta para que su número no se reutilice
+        # (SQLite reutiliza el último id) y no se mezcle con el historial de otra cámara.
+        camera.is_active = False
+        camera.status = 'offline'
+        camera.stream_url = f'eliminada:{camera.id}'
+        camera.output_stream_url = camera.ip_address = camera.username = camera.password = None
+    else:
+        db.delete(camera)
     db.commit()
     if stored_video_path:
-        stored_video_path.unlink(missing_ok=True)
+        remove_video_file(stored_video_path, db)

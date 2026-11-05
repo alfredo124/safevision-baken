@@ -8,6 +8,8 @@ class Camera(Base):
     name = Column(String, nullable=False)
     laboratory_type = Column(String, nullable=False) # QUIMICA o FISICA
     stream_url = Column(String, nullable=False)
+    # STREAM: webcam/RTSP/archivo abierto por el servidor. BROWSER: estación de cámara del navegador.
+    source_type = Column(String, nullable=False, default='STREAM', server_default='STREAM')
     output_stream_url = Column(String, nullable=True)
     ip_address = Column(String, nullable=True)
     username = Column(String, nullable=True)

@@ -28,9 +28,35 @@ def _max_fps_from_env() -> float:
         return 2.0
 
 
-# Límite de análisis por cámara (SAFEVISION_MAX_FPS, por defecto 2). En una CPU de 2 núcleos,
-# pose + best.pt tardan ~0.7 s por frame y el ritmo real es menor; con GPU se puede subir a 4-5.
+def _image_size_from_env() -> int:
+    """Tamaño de imagen para YOLO (SAFEVISION_IMGSZ, 640 por defecto). Múltiplo de 32.
+    480 es ~1.8 veces más rápido en CPU; se decide con el video de calibración (Tarea 1)."""
+    import os
+    try:
+        value = int(os.environ.get('SAFEVISION_IMGSZ', '640'))
+    except ValueError:
+        return 640
+    return min(1280, max(320, round(value / 32) * 32))
+
+
+# Límite de análisis por cámara. Automático según la velocidad medida del equipo (performance.py);
+# SAFEVISION_MAX_FPS, si está definida, manda. MAX_PROCESSING_FPS queda como valor inicial.
 MAX_PROCESSING_FPS = _max_fps_from_env()
+
+
+def max_processing_fps() -> float:
+    import os
+    from app.modules.ai_vision import performance
+    if os.environ.get('SAFEVISION_MAX_FPS'):
+        return _max_fps_from_env()
+    return performance.profile()['auto_max_fps']
+
+
+def performance_summary() -> dict:
+    import os
+    from app.modules.ai_vision import performance
+    return {**performance.profile(), 'max_fps': max_processing_fps(),
+            'manual': bool(os.environ.get('SAFEVISION_MAX_FPS')), 'imgsz': _image_size_from_env()}
 
 # Sincronización video/recuadros durante la práctica: el video se retrasa lo mismo
 # que tarda el análisis, para que cada recuadro coincida con el frame analizado.
@@ -115,6 +141,9 @@ def resolve_source(stream_url: str) -> str:
 
 
 def _open_capture(stream_url: str):
+    from app.modules.ai_vision.browser_ingest import is_browser_source, open_browser_capture
+    if is_browser_source(stream_url):
+        return open_browser_capture(stream_url)
     stream_url = resolve_source(stream_url)
     is_file = Path(stream_url).is_file()
     source = stream_url if is_file or not stream_url.isdigit() else int(stream_url)
@@ -122,11 +151,11 @@ def _open_capture(stream_url: str):
 
 
 class VideoStreamProcessor:
-    def __init__(self, model_path='best.pt', image_size=640, jpeg_quality=75, confidence_floor=0.25,
+    def __init__(self, model_path='best.pt', image_size=None, jpeg_quality=75, confidence_floor=0.25,
                  pose_model_path='yolo11n-pose.pt', capture_factory=None, pipeline_factory=None):
         self.model_path = model_path
         self.pose_model_path = pose_model_path
-        self.image_size = image_size
+        self.image_size = image_size or _image_size_from_env()
         self.jpeg_quality = jpeg_quality
         self.confidence_floor = confidence_floor
         self.streams: dict[int, CameraStream] = {}
@@ -152,8 +181,11 @@ class VideoStreamProcessor:
     def _new_pipeline(self):
         if self._pipeline_factory:
             return self._pipeline_factory()
+        from app.modules.ai_vision import performance
         from app.modules.ai_vision.detectors import DetectorPipeline, PersonTracker
-        return DetectorPipeline(self.equipment_detector, PersonTracker(self.pose_model_path), self.image_size)
+        pipeline = DetectorPipeline(self.equipment_detector, PersonTracker(self.pose_model_path), self.image_size)
+        performance.measure(pipeline)  # solo la primera vez: ajusta el límite a este equipo
+        return pipeline
 
     def predict_options(self, confidence_threshold):
         """Argumentos de YOLO para una cámara.
@@ -178,8 +210,8 @@ class VideoStreamProcessor:
         try:
             value = float(processing_fps)
         except (TypeError, ValueError):
-            value = MAX_PROCESSING_FPS
-        return min(MAX_PROCESSING_FPS, max(0.5, value))
+            value = max_processing_fps()
+        return min(max_processing_fps(), max(0.5, value))
 
     # ------------------------------------------------------------ suscripciones
     def subscribe(self, camera_id, stream_url, draw_boxes=True, confidence_threshold=0.5, processing_fps=10,
@@ -312,7 +344,7 @@ class VideoStreamProcessor:
 
     # --------------------------------------------------------------- monitoreo
     def start_monitoring(self, camera_id, stream_url, rules: list[EquipmentRule], on_event: EventHandler,
-                         confidence_threshold=0.5, processing_fps=MAX_PROCESSING_FPS, workshop_id=None,
+                         confidence_threshold=0.5, processing_fps=None, workshop_id=None,
                          config: ComplianceConfig | None = None) -> bool:
         """Inicia el análisis continuo de una cámara. Devuelve False si ya estaba activo."""
         with self.lock:
@@ -326,6 +358,22 @@ class VideoStreamProcessor:
             stream = self.streams[camera_id]
             with stream.condition:
                 stream.monitor = monitor
+        return True
+
+    def update_monitoring_rules(self, camera_id, rules: list[EquipmentRule]) -> bool:
+        """Cambia las reglas de una cámara en práctica sin cortar el video. Devuelve True si cambiaron.
+        La verificación de cada persona empieza de nuevo con las reglas nuevas."""
+        with self.lock:
+            stream = self.streams.get(camera_id)
+        if not stream or not stream.monitor:
+            return False
+        with stream.condition:
+            monitor = stream.monitor
+            current = monitor.engine.rules + monitor.engine.unsupported_rules
+            key = lambda items: sorted(items, key=lambda rule: rule.equipment_id)
+            if key(current) == key(list(rules)):
+                return False
+            monitor.engine = ComplianceEngine(rules, monitor.engine.config)
         return True
 
     def stop_monitoring(self, camera_id) -> bool:
@@ -445,17 +493,21 @@ class VideoStreamProcessor:
             stream.condition.notify_all()
         logger.warning('Cámara %s sin señal: reconectando.', stream.camera_id)
         stream.capture.release()
-        started, wait = time.monotonic(), RECONNECT_FIRST_WAIT
+        from app.modules.ai_vision.browser_ingest import is_browser_source
+        browser = is_browser_source(stream.stream_url)
+        started, wait = time.monotonic(), (0.5 if browser else RECONNECT_FIRST_WAIT)
         try:
-            while not stream.stop_event.is_set() and time.monotonic() - started < RECONNECT_MAX_SECONDS:
+            # Una estación del navegador puede volver en cualquier momento: se espera sin límite.
+            while not stream.stop_event.is_set() and (browser or time.monotonic() - started < RECONNECT_MAX_SECONDS):
                 if stream.stop_event.wait(wait):
                     return False
-                wait = min(RECONNECT_MAX_WAIT, wait * 2)
+                wait = min(1.0 if browser else RECONNECT_MAX_WAIT, wait * 2)
                 try:
                     capture, _ = self._capture_factory(stream.stream_url)
                 except Exception:
                     continue
-                if capture.isOpened():
+                opened = capture.slot.has_signal() if browser else capture.isOpened()
+                if opened:
                     capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
                     stream.capture = capture
                     logger.info('Cámara %s reconectada.', stream.camera_id)

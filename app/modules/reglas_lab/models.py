@@ -63,6 +63,11 @@ class Incident(Base):
     code = Column(String(40), nullable=False, unique=True, index=True)
     workshop_id = Column(Integer, ForeignKey('lab_workshops.id'), nullable=False, index=True)
     camera_id = Column(Integer, ForeignKey('cameras.id'), nullable=False, index=True)
+    # Datos del momento de la incidencia: el historial no cambia si la cámara se elimina o se renombra,
+    # ni si el taller se desactiva. La incidencia es de lo ocurrido, no de la cámara.
+    camera_name = Column(String(120), nullable=True)
+    workshop_name = Column(String(120), nullable=True)
+    laboratory_type = Column(String(20), nullable=True)
     equipment_id = Column(String(80), ForeignKey('lab_safety_equipment.id'), nullable=True)
     title = Column(String(160), nullable=False)
     description = Column(String(1000), nullable=False)

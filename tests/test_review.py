@@ -1,4 +1,5 @@
 """Tarea 2A: el encargado confirma o descarta una alerta. SQLite temporal."""
+import tests  # noqa: F401  Primero: BD y capturas temporales (nunca las reales), se ejecute como se ejecute.
 import shutil
 import tempfile
 import unittest

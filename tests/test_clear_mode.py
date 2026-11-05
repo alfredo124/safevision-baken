@@ -1,4 +1,5 @@
 """Fase de prueba: al iniciar la práctica, el administrador puede borrar las incidencias previas del taller."""
+import tests  # noqa: F401  Primero: BD y capturas temporales (nunca las reales), se ejecute como se ejecute.
 import os
 import shutil
 import tempfile

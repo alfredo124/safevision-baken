@@ -1,5 +1,7 @@
 """Umbral de confianza e imgsz (Tarea 0, paso 4)."""
+import tests  # noqa: F401  Primero: BD y capturas temporales (nunca las reales), se ejecute como se ejecute.
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from app.modules.ai_vision.services import VideoStreamProcessor
@@ -27,9 +29,11 @@ class PredictOptionsTest(unittest.TestCase):
             self.assertEqual(_processor_without_model().predict_options(value)['conf'], 0.25)
 
     def test_default_image_size_matches_training(self):
-        import inspect
-        default = inspect.signature(VideoStreamProcessor.__init__).parameters['image_size'].default
-        self.assertEqual(default, 640)
+        import os
+        from app.modules.ai_vision.services import _image_size_from_env
+        with mock.patch.dict(os.environ):
+            os.environ.pop('SAFEVISION_IMGSZ', None)
+            self.assertEqual(_image_size_from_env(), 640, 'Sin configurar, el mismo tamaño del entrenamiento')
         self.assertEqual(_processor_without_model().predict_options(0.5)['imgsz'], 640)
 
 

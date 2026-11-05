@@ -1,4 +1,5 @@
 """Códigos de regla del reglamento, vestimenta manual y propuesta confirmada. SQLite temporal."""
+import tests  # noqa: F401  Primero: BD y capturas temporales (nunca las reales), se ejecute como se ejecute.
 import sqlite3
 import tempfile
 import unittest
