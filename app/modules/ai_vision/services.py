@@ -20,9 +20,17 @@ from app.modules.reglas_lab.compliance import ComplianceConfig, ComplianceEngine
 
 logger = logging.getLogger(__name__)
 
-# Límite explícito de análisis por cámara. En la CPU de desarrollo, pose + best.pt
-# tardan ~0.7 s por frame, así que el ritmo real puede ser menor.
-MAX_PROCESSING_FPS = 2.0
+def _max_fps_from_env() -> float:
+    import os
+    try:
+        return max(0.5, float(os.environ.get('SAFEVISION_MAX_FPS', '2')))
+    except ValueError:
+        return 2.0
+
+
+# Límite de análisis por cámara (SAFEVISION_MAX_FPS, por defecto 2). En una CPU de 2 núcleos,
+# pose + best.pt tardan ~0.7 s por frame y el ritmo real es menor; con GPU se puede subir a 4-5.
+MAX_PROCESSING_FPS = _max_fps_from_env()
 
 # Sincronización video/recuadros durante la práctica: el video se retrasa lo mismo
 # que tarda el análisis, para que cada recuadro coincida con el frame analizado.
@@ -32,6 +40,9 @@ MAX_SYNC_DELAY = 4.0
 RECONNECT_MAX_SECONDS = 120.0
 RECONNECT_MAX_WAIT = 10.0
 RECONNECT_FIRST_WAIT = 1.0
+
+# Miniaturas: la cámara se mantiene abierta mientras alguien pida imágenes sueltas.
+SNAPSHOT_LEASE_SECONDS = 6.0
 
 # Callback de incidencias: (camera_id, evento, frame, observación) -> None
 EventHandler = Callable[[int, object, object, object], None]
@@ -87,7 +98,24 @@ class CameraStream:
         return len(self.subscriptions)
 
 
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+
+
+def resolve_source(stream_url: str) -> str:
+    """Ruta de video que funciona en cualquier PC: si la ruta guardada no existe (el proyecto
+    está en otra carpeta), se busca el mismo archivo en videos/cameras o videos/ del proyecto."""
+    if stream_url.isdigit() or '://' in stream_url or Path(stream_url).is_file():
+        return stream_url
+    name = Path(stream_url.replace('\\', '/')).name
+    for folder in (PROJECT_ROOT / 'videos' / 'cameras', PROJECT_ROOT / 'videos'):
+        candidate = folder / name
+        if name and candidate.is_file():
+            return str(candidate)
+    return stream_url
+
+
 def _open_capture(stream_url: str):
+    stream_url = resolve_source(stream_url)
     is_file = Path(stream_url).is_file()
     source = stream_url if is_file or not stream_url.isdigit() else int(stream_url)
     return cv2.VideoCapture(source), is_file
@@ -108,6 +136,8 @@ class VideoStreamProcessor:
         self._pipeline_factory = pipeline_factory
         self._equipment_detector = None
         self._model_lock = threading.Lock()
+        self._snapshot_leases: dict[int, list] = {}  # camera_id -> [token, último uso]
+        self._lease_thread: threading.Thread | None = None
 
     # ------------------------------------------------------------------ modelos
     @property
@@ -223,6 +253,56 @@ class VideoStreamProcessor:
                 return
             self.streams.pop(camera_id, None)
             self._stop_stream(stream)
+
+    def snapshot(self, camera_id, stream_url, live=False, timeout=3.0, **subscribe_options) -> bytes | None:
+        """Última imagen JPEG de la cámara, para miniaturas consultadas 1-2 veces por segundo.
+
+        No deja una conexión abierta en el navegador: la cámara se mantiene abierta con una
+        "reserva" que caduca a los SNAPSHOT_LEASE_SECONDS sin peticiones.
+        """
+        with self.lock:
+            lease = self._snapshot_leases.get(camera_id)
+            stream = self.streams.get(camera_id)
+            valid = lease and stream and lease[0] in stream.subscriptions and not stream.stop_event.is_set()
+            if valid:
+                lease[1] = time.monotonic()
+        if not valid:
+            token = self.subscribe(camera_id, stream_url, **subscribe_options)
+            with self.lock:
+                self._snapshot_leases[camera_id] = [token, time.monotonic()]
+            self._ensure_lease_reaper()
+        with self.lock:
+            stream = self.streams.get(camera_id)
+        if not stream:
+            return None
+        with stream.condition:
+            if live and stream.live_jpeg is None or not live and stream.latest_jpeg is None:
+                stream.condition.wait_for(
+                    lambda: (stream.live_jpeg if live else stream.latest_jpeg) is not None
+                    or stream.stop_event.is_set(), timeout=timeout)
+            return stream.live_jpeg if live else stream.latest_jpeg
+
+    def _ensure_lease_reaper(self):
+        with self.lock:
+            if self._lease_thread and self._lease_thread.is_alive():
+                return
+            self._lease_thread = threading.Thread(target=self._reap_leases, daemon=True, name='snapshot-leases')
+            self._lease_thread.start()
+
+    def _reap_leases(self):
+        while True:
+            time.sleep(1.0)
+            now = time.monotonic()
+            with self.lock:
+                expired = [(camera_id, lease[0]) for camera_id, lease in self._snapshot_leases.items()
+                           if now - lease[1] > SNAPSHOT_LEASE_SECONDS]
+                for camera_id, _ in expired:
+                    self._snapshot_leases.pop(camera_id, None)
+                if not self._snapshot_leases and not expired:
+                    self._lease_thread = None
+                    return
+            for camera_id, token in expired:
+                self.unsubscribe(camera_id, token)
 
     def release_camera(self, camera_id):
         with self.lock:

@@ -68,35 +68,27 @@ def video_feed(camera_id: int, token: str | None = Query(None), sync: bool = Que
         media_type='multipart/x-mixed-replace; boundary=frame'
     )
 
-@router.get('/video_feed_raw/{camera_id}')
-def video_feed_raw(camera_id: int, token: str | None = Query(None), db: Session = Depends(get_db)):
-    if not token:
-        raise HTTPException(status_code=401, detail='Autenticación requerida')
-    current_user = get_user_from_token(token)
-    camera = get_camera_for_user(camera_id, db, current_user)
-    
-    return StreamingResponse(
-        frame_generator_raw(camera_id, camera.stream_url),
-        media_type='multipart/x-mixed-replace; boundary=frame'
-    )
+@router.get('/snapshot/{camera_id}')
+def video_snapshot(camera_id: int, sync: bool = Query(True), db: Session = Depends(get_db),
+                   current_user=Depends(get_current_user)):
+    """Última imagen de la cámara para la cuadrícula (se consulta 1-2 veces por segundo).
 
-def frame_generator_raw(camera_id, stream_url):
-    source = int(stream_url) if stream_url.isdigit() else stream_url
-    cap = cv2.VideoCapture(source)
+    A diferencia de video_feed, no mantiene una conexión abierta por miniatura y el token
+    viaja en la cabecera Authorization, no en la URL.
+    """
+    from fastapi import Response
+    camera = get_camera_for_user(camera_id, db, current_user)
     try:
-        while True:
-            success, frame = cap.read()
-            if not success:
-                if not stream_url.isdigit():
-                    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                    continue
-                break
-            ret, buffer = cv2.imencode('.jpg', frame)
-            if ret:
-                yield (b'--frame\r\n'
-                       b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
-    finally:
-        cap.release()
+        jpeg = video_processor.snapshot(
+            camera.id, camera.stream_url, live=not sync,
+            confidence_threshold=camera.confidence_threshold, processing_fps=camera.processing_fps,
+        )
+    except RuntimeError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+    if jpeg is None:
+        raise HTTPException(status_code=503, detail='La cámara todavía no tiene imagen')
+    return Response(jpeg, media_type='image/jpeg', headers={'Cache-Control': 'no-store'})
+
 
 @router.websocket("/ws/detections/{camera_id}")
 async def websocket_detections(websocket: WebSocket, camera_id: int):
