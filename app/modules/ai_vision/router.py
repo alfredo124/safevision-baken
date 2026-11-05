@@ -18,17 +18,17 @@ def get_db():
     finally:
         db.close()
 
-def frame_generator(camera_id):
+def frame_generator(camera_id, subscription=None, live=False):
     sequence = 0
     try:
         while True:
-            frame_bytes, _, sequence = video_processor.get_frame(camera_id, after_sequence=sequence)
+            frame_bytes, _, sequence = video_processor.get_frame(camera_id, after_sequence=sequence, live=live)
             if frame_bytes is None:
                 break
             yield (b'--frame\r\n'
                    b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
     finally:
-        video_processor.unsubscribe(camera_id)
+        video_processor.unsubscribe(camera_id, subscription)
 
 def get_camera_for_user(camera_id: int, db: Session, current_user):
     camera = db.query(models.Camera).filter(models.Camera.id == camera_id).first()
@@ -43,14 +43,17 @@ def get_camera_for_user(camera_id: int, db: Session, current_user):
 
 
 @router.get('/video_feed/{camera_id}')
-def video_feed(camera_id: int, token: str | None = Query(None), db: Session = Depends(get_db)):
+def video_feed(camera_id: int, token: str | None = Query(None), sync: bool = Query(True),
+               db: Session = Depends(get_db)):
+    """Video limpio. sync=true (por defecto): retrasado para coincidir con los recuadros.
+    sync=false: en vivo, sin retraso; los recuadros llegan algo atrasados."""
     if not token:
         raise HTTPException(status_code=401, detail='Autenticación requerida')
     current_user = get_user_from_token(token)
     camera = get_camera_for_user(camera_id, db, current_user)
 
     try:
-        video_processor.subscribe(
+        subscription = video_processor.subscribe(
             camera.id,
             camera.stream_url,
             draw_boxes=camera.overlay_enabled,
@@ -61,7 +64,7 @@ def video_feed(camera_id: int, token: str | None = Query(None), db: Session = De
         raise HTTPException(status_code=503, detail=str(error)) from error
 
     return StreamingResponse(
-        frame_generator(camera.id),
+        frame_generator(camera.id, subscription, live=not sync),
         media_type='multipart/x-mixed-replace; boundary=frame'
     )
 
@@ -112,12 +115,32 @@ async def websocket_detections(websocket: WebSocket, camera_id: int):
         await websocket.close(code=4403 if exc.status_code == 403 else 4401)
         return
 
+    live = websocket.query_params.get('sync') in ('0', 'false')
     await websocket.accept()
+    # Mensajes del motor (Tarea 1C): uno por análisis, no por frame. Sin práctica
+    # iniciada se envía un aviso cada 2 s para que el cliente borre los recuadros.
+    last_sent, idle_since = None, 0.0
     try:
         while True:
-            detections = video_processor.latest_detections.get(camera_id, [])
-            await websocket.send_text(json.dumps(detections))
-            await asyncio.sleep(0.03)
+            status = video_processor.monitoring_status(camera_id)
+            overlay = video_processor.latest_overlay(camera_id, live=live)
+            now = asyncio.get_running_loop().time()
+            meta = {'sync': not live}
+            if status:
+                meta.update(sync_delay=0.0 if live else status['sync_delay'], analysis_rate=status['analysis_rate'],
+                            started_at=status['started_at'])
+            if overlay is not None and overlay.get('analysis_id') != last_sent:
+                await websocket.send_text(json.dumps({**overlay, **meta}))
+                last_sent, idle_since = overlay.get('analysis_id'), now
+            elif overlay is None and now - idle_since >= 1.0:
+                # Sin práctica: aviso para borrar recuadros. Con práctica pero aún sin un
+                # análisis que mostrar: "sincronizando" (no es "práctica no iniciada").
+                await websocket.send_text(json.dumps({
+                    'camera_id': camera_id, 'monitoring': bool(status), 'warming_up': bool(status),
+                    'people': [], **meta,
+                }))
+                idle_since, last_sent = now, None
+            await asyncio.sleep(0.1)
     except WebSocketDisconnect:
         pass
 

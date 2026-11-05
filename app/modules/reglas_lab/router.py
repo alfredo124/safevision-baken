@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from app.core.database import SessionLocal
 from app.modules.ai_vision.models import Camera
 from app.modules.auth_db.dependencies import get_current_user
+from app.modules.auth_db.models import User
 from app.modules.reglas_lab import models, schemas
 
 router = APIRouter(prefix='/modules/reglas_lab', tags=['reglas_lab'])
@@ -46,6 +47,16 @@ def _camera_summary(camera: Camera) -> dict:
     }
 
 
+def effective_rule(rule: models.WorkshopEquipmentRule, equipment: models.SafetyEquipment) -> dict:
+    """Código y gravedad vigentes: los del reglamento o, si faltan, los del catálogo."""
+    return {
+        'equipment_id': rule.equipment_id,
+        'rule_code': rule.rule_code or equipment.missing_code,
+        'severity': rule.severity or equipment.impact,
+        'manual_verification': not equipment.model_class,
+    }
+
+
 def _workshop_response(db: Session, workshop: models.Workshop) -> dict:
     cameras = (
         db.query(Camera)
@@ -54,12 +65,14 @@ def _workshop_response(db: Session, workshop: models.Workshop) -> dict:
         .order_by(Camera.id)
         .all()
     )
-    required_ids = [
-        row.equipment_id
-        for row in db.query(models.WorkshopEquipmentRule)
-        .filter_by(workshop_id=workshop.id, is_required=True)
+    rule_rows = (
+        db.query(models.WorkshopEquipmentRule, models.SafetyEquipment)
+        .join(models.SafetyEquipment, models.SafetyEquipment.id == models.WorkshopEquipmentRule.equipment_id)
+        .filter(models.WorkshopEquipmentRule.workshop_id == workshop.id, models.WorkshopEquipmentRule.is_required.is_(True))
+        .order_by(models.WorkshopEquipmentRule.equipment_id)
         .all()
-    ]
+    )
+    required_ids = [rule.equipment_id for rule, _ in rule_rows]
     return {
         'id': workshop.id,
         'name': workshop.name,
@@ -67,12 +80,47 @@ def _workshop_response(db: Session, workshop: models.Workshop) -> dict:
         'description': workshop.description,
         'cameras': [_camera_summary(camera) for camera in cameras],
         'required_equipment_ids': required_ids,
+        'rules': [effective_rule(rule, equipment) for rule, equipment in rule_rows],
         'created_at': workshop.created_at,
         'updated_at': workshop.updated_at,
     }
 
 
-def _incident_response(incident, workshop_name: str, camera_name: str, equipment_name: str | None) -> dict:
+def _as_utc(value: datetime | None) -> datetime | None:
+    """SQLite devuelve fechas sin zona; se guardan en UTC, así que se marcan como UTC."""
+    if value is not None and value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value
+
+
+def _faults_by_incident(db: Session, incidents: list) -> dict[int, list[dict]]:
+    """Faltas (evidencias) de cada alerta. Las incidencias antiguas sin faltas se
+    muestran como una sola falta con los datos de la incidencia."""
+    ids = [incident.id for incident in incidents]
+    rows = (db.query(models.IncidentFault).filter(models.IncidentFault.incident_id.in_(ids))
+            .order_by(models.IncidentFault.detected_at, models.IncidentFault.id).all()) if ids else []
+    equipment_ids = {row.equipment_id for row in rows} | {i.equipment_id for i in incidents}
+    names = dict(db.query(models.SafetyEquipment.id, models.SafetyEquipment.name)
+                 .filter(models.SafetyEquipment.id.in_([e for e in equipment_ids if e])).all())
+    result: dict[int, list[dict]] = {incident.id: [] for incident in incidents}
+    for row in rows:
+        result[row.incident_id].append({
+            'id': row.id, 'equipment_id': row.equipment_id, 'equipment_name': names.get(row.equipment_id),
+            'rule_code': row.rule_code, 'severity': row.severity, 'has_capture': bool(row.capture_path),
+            'detected_at': _as_utc(row.detected_at),
+        })
+    for incident in incidents:
+        if not result[incident.id]:
+            result[incident.id].append({
+                'id': None, 'equipment_id': incident.equipment_id, 'equipment_name': names.get(incident.equipment_id),
+                'rule_code': incident.rule_code, 'severity': incident.severity,
+                'has_capture': bool(incident.capture_path), 'detected_at': _as_utc(incident.occurred_at),
+            })
+    return result
+
+
+def _incident_response(incident, workshop_name: str, camera_name: str, equipment_name: str | None,
+                       reviewer_name: str | None = None, faults: list[dict] | None = None) -> dict:
     return {
         'id': incident.id,
         'code': incident.code,
@@ -91,7 +139,15 @@ def _incident_response(incident, workshop_name: str, camera_name: str, equipment
         'bounding_box': incident.bounding_box,
         'frame_width': incident.frame_width,
         'frame_height': incident.frame_height,
-        'occurred_at': incident.occurred_at,
+        'occurred_at': _as_utc(incident.occurred_at),
+        'rule_code': incident.rule_code,
+        'has_capture': bool(incident.capture_path),
+        'created_by_system': incident.created_by is None,
+        'reviewed_by_name': reviewer_name,
+        'reviewed_at': _as_utc(incident.reviewed_at),
+        'review_reason': incident.review_reason,
+        'action_taken': incident.action_taken,
+        'faults': faults or [],
     }
 
 
@@ -156,7 +212,23 @@ def update_workshop_configuration(
     _ensure_workshop_access(workshop, current_user)
 
     camera_ids = set(payload.camera_ids)
-    equipment_ids = set(payload.required_equipment_ids)
+    if payload.rules is not None:
+        requested_rules = {rule.equipment_id: rule for rule in payload.rules}
+    else:
+        # Compatibilidad: solo identificadores; se conservan los códigos ya guardados.
+        previous = {
+            row.equipment_id: row
+            for row in db.query(models.WorkshopEquipmentRule).filter_by(workshop_id=workshop_id).all()
+        }
+        requested_rules = {
+            equipment_id: schemas.WorkshopRule(
+                equipment_id=equipment_id,
+                rule_code=previous[equipment_id].rule_code if equipment_id in previous else None,
+                severity=previous[equipment_id].severity if equipment_id in previous else None,
+            )
+            for equipment_id in payload.required_equipment_ids
+        }
+    equipment_ids = set(requested_rules)
     cameras = db.query(Camera).filter(Camera.id.in_(camera_ids), Camera.is_active.is_(True)).all() if camera_ids else []
     if len(cameras) != len(camera_ids):
         raise HTTPException(status_code=400, detail='Una o más cámaras no existen o están inactivas')
@@ -184,8 +256,11 @@ def update_workshop_configuration(
         db.query(models.WorkshopEquipmentRule).filter_by(workshop_id=workshop_id).delete(synchronize_session=False)
         db.add_all(models.WorkshopCamera(workshop_id=workshop_id, camera_id=camera_id) for camera_id in camera_ids)
         db.add_all(
-            models.WorkshopEquipmentRule(workshop_id=workshop_id, equipment_id=equipment_id, is_required=True)
-            for equipment_id in equipment_ids
+            models.WorkshopEquipmentRule(
+                workshop_id=workshop_id, equipment_id=rule.equipment_id, is_required=True,
+                rule_code=(rule.rule_code or '').strip() or None, severity=rule.severity,
+            )
+            for rule in requested_rules.values()
         )
         workshop.updated_at = datetime.now(timezone.utc)
         db.commit()
@@ -227,10 +302,11 @@ def list_incidents(
     current_user=Depends(get_current_user),
 ):
     query = (
-        db.query(models.Incident, models.Workshop.name, Camera.name, models.SafetyEquipment.name)
+        db.query(models.Incident, models.Workshop.name, Camera.name, models.SafetyEquipment.name, User.full_name)
         .join(models.Workshop, models.Workshop.id == models.Incident.workshop_id)
         .join(Camera, Camera.id == models.Incident.camera_id)
         .outerjoin(models.SafetyEquipment, models.SafetyEquipment.id == models.Incident.equipment_id)
+        .outerjoin(User, User.id == models.Incident.reviewed_by)
     )
     permitted_area = {'ENCARGADO_QUIMICA': 'QUIMICA', 'ENCARGADO_FISICA': 'FISICA'}.get(_role(current_user))
     if permitted_area:
@@ -246,9 +322,11 @@ def list_incidents(
     if incident_status:
         query = query.filter(models.Incident.status == incident_status)
 
+    rows = query.order_by(models.Incident.occurred_at.desc()).limit(500).all()
+    faults = _faults_by_incident(db, [row[0] for row in rows])
     return [
-        _incident_response(incident, workshop_name, camera_name, equipment_name)
-        for incident, workshop_name, camera_name, equipment_name in query.order_by(models.Incident.occurred_at.desc()).limit(500).all()
+        _incident_response(incident, workshop_name, camera_name, equipment_name, reviewer_name, faults[incident.id])
+        for incident, workshop_name, camera_name, equipment_name, reviewer_name in rows
     ]
 
 
@@ -309,7 +387,7 @@ def create_incident(
         'bounding_box': incident.bounding_box,
         'frame_width': incident.frame_width,
         'frame_height': incident.frame_height,
-        'occurred_at': incident.occurred_at,
+        'occurred_at': _as_utc(incident.occurred_at),
     }
 
 
@@ -325,8 +403,157 @@ def update_incident_status(
         raise HTTPException(status_code=404, detail='Incidencia no encontrada')
     workshop = db.query(models.Workshop).filter_by(id=incident.workshop_id).first()
     _ensure_workshop_access(workshop, current_user)
+    if incident.status in REVIEWED_STATUSES:
+        raise HTTPException(status_code=409, detail='La incidencia ya fue validada')
     incident.status = payload.status
     db.commit()
+    return _single_incident_response(db, incident, workshop)
+
+
+REVIEWED_STATUSES = {'CONFIRMADA', 'DESCARTADA'}
+
+
+def _single_incident_response(db: Session, incident, workshop) -> dict:
     camera_name = db.query(Camera.name).filter_by(id=incident.camera_id).scalar()
     equipment_name = db.query(models.SafetyEquipment.name).filter_by(id=incident.equipment_id).scalar()
-    return _incident_response(incident, workshop.name, camera_name, equipment_name)
+    reviewer_name = db.query(User.full_name).filter_by(id=incident.reviewed_by).scalar() if incident.reviewed_by else None
+    faults = _faults_by_incident(db, [incident])[incident.id]
+    return _incident_response(incident, workshop.name, camera_name, equipment_name, reviewer_name, faults)
+
+
+@router.post('/incidents/{incident_id}/review', response_model=schemas.IncidentResponse)
+def review_incident(
+    incident_id: int,
+    payload: schemas.IncidentReview,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Confirma o descarta una alerta. Solo el encargado del área o el administrador."""
+    from app.modules.ai_vision.capture import delete_capture
+
+    incident = db.query(models.Incident).filter_by(id=incident_id).first()
+    if not incident:
+        raise HTTPException(status_code=404, detail='Incidencia no encontrada')
+    workshop = db.query(models.Workshop).filter_by(id=incident.workshop_id).first()
+    _ensure_workshop_access(workshop, current_user)
+    if incident.status in REVIEWED_STATUSES:
+        raise HTTPException(status_code=409, detail='La incidencia ya fue validada')
+    if payload.decision == 'CONFIRMADA' and not payload.action:
+        raise HTTPException(status_code=422, detail='Indica la acción tomada: CORREGIDO o RETIRADO_DE_PRACTICA')
+
+    incident.status = payload.decision
+    incident.reviewed_by = current_user.id
+    incident.reviewed_at = datetime.now(timezone.utc)
+    incident.review_reason = (payload.reason or '').strip() or None
+    incident.action_taken = payload.action if payload.decision == 'CONFIRMADA' else None
+    if payload.decision == 'DESCARTADA':
+        # Una falsa alarma no conserva imágenes; quedan solo los datos mínimos para medirla.
+        for fault in db.query(models.IncidentFault).filter_by(incident_id=incident.id).all():
+            if fault.capture_path:
+                delete_capture(fault.capture_path)
+                fault.capture_path = None
+        if incident.capture_path:
+            delete_capture(incident.capture_path)
+            incident.capture_path = None
+    db.commit()
+    return _single_incident_response(db, incident, workshop)
+
+# --------------------------------------------------------------------- monitoreo
+def _workshop_for_monitoring(db: Session, workshop_id: int, current_user) -> models.Workshop:
+    _ensure_can_manage(current_user)
+    workshop = db.query(models.Workshop).filter_by(id=workshop_id, is_active=True).first()
+    if not workshop:
+        raise HTTPException(status_code=404, detail='Taller no encontrado')
+    _ensure_workshop_access(workshop, current_user)
+    return workshop
+
+
+@router.get('/test-mode')
+def get_test_mode(current_user=Depends(get_current_user)):
+    from app.modules.reglas_lab.incident_service import test_mode_enabled
+    return {'enabled': test_mode_enabled(), 'can_clear': test_mode_enabled() and _role(current_user) == 'ADMINISTRADOR'}
+
+
+@router.post('/workshops/{workshop_id}/monitoring/start')
+def start_monitoring(workshop_id: int, payload: schemas.MonitoringStart | None = None,
+                     db: Session = Depends(get_db), current_user=Depends(get_current_user)):
+    """Inicia la práctica: analiza todas las cámaras del taller aunque nadie mire el video.
+
+    Con clear_previous (fase de prueba, solo administrador) borra antes las incidencias,
+    faltas y capturas de ese taller y reinicia el motor.
+    """
+    from app.modules.reglas_lab import monitoring
+    from app.modules.reglas_lab.incident_service import clear_workshop_incidents, test_mode_enabled
+    _workshop_for_monitoring(db, workshop_id, current_user)
+    cleared = 0
+    if payload and payload.clear_previous:
+        if not test_mode_enabled():
+            raise HTTPException(status_code=403, detail='El borrado de incidencias está desactivado (modo prueba apagado)')
+        if _role(current_user) != 'ADMINISTRADOR':
+            raise HTTPException(status_code=403, detail='Solo el administrador puede borrar incidencias de prueba')
+        monitoring.stop_workshop(db, workshop_id)  # el motor también empieza de cero
+        cleared = clear_workshop_incidents(db, workshop_id)
+    return {'workshop_id': workshop_id, 'cleared_incidents': cleared,
+            'cameras': monitoring.start_workshop(db, workshop_id)}
+
+
+@router.post('/workshops/{workshop_id}/monitoring/stop')
+def stop_monitoring(workshop_id: int, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
+    from app.modules.reglas_lab import monitoring
+    _workshop_for_monitoring(db, workshop_id, current_user)
+    return {'workshop_id': workshop_id, 'cameras': monitoring.stop_workshop(db, workshop_id)}
+
+
+@router.get('/workshops/{workshop_id}/monitoring')
+def monitoring_status(workshop_id: int, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
+    from app.modules.reglas_lab import monitoring
+    workshop = db.query(models.Workshop).filter_by(id=workshop_id, is_active=True).first()
+    if not workshop:
+        raise HTTPException(status_code=404, detail='Taller no encontrado')
+    _ensure_workshop_access(workshop, current_user)
+    return {'workshop_id': workshop_id, 'cameras': monitoring.workshop_status(db, workshop_id)}
+
+
+def _serve_capture(db: Session, incident_id: int, current_user, fault_id: int | None = None):
+    """Devuelve la captura enmascarada tras comprobar el acceso al taller de la incidencia.
+
+    La ruta del archivo sale siempre de la base de datos, nunca de la petición.
+    """
+    from fastapi.responses import FileResponse
+    from app.modules.ai_vision.capture import CAPTURE_DIR, PROJECT_ROOT
+
+    incident = db.query(models.Incident).filter_by(id=incident_id).first()
+    if not incident:
+        raise HTTPException(status_code=404, detail='Incidencia no encontrada')
+    workshop = db.query(models.Workshop).filter_by(id=incident.workshop_id).first()
+    _ensure_workshop_access(workshop, current_user)
+    if fault_id is None:
+        capture_path = incident.capture_path
+    else:
+        fault = db.query(models.IncidentFault).filter_by(id=fault_id, incident_id=incident.id).first()
+        if not fault:
+            raise HTTPException(status_code=404, detail='Falta no encontrada')
+        capture_path = fault.capture_path
+    if not capture_path:
+        raise HTTPException(status_code=404, detail='La incidencia no tiene captura')
+    path = (PROJECT_ROOT / capture_path).resolve()
+    try:
+        path.relative_to(CAPTURE_DIR.resolve())  # nunca servir archivos fuera de capturas/
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail='Captura no disponible') from error
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail='Captura no disponible')
+    return FileResponse(path, media_type='image/jpeg', headers={'Cache-Control': 'private, no-store'})
+
+
+@router.get('/incidents/{incident_id}/faults/{fault_id}/capture')
+def fault_capture(incident_id: int, fault_id: int, db: Session = Depends(get_db),
+                  current_user=Depends(get_current_user)):
+    """Evidencia de una falta concreta de la alerta."""
+    return _serve_capture(db, incident_id, current_user, fault_id)
+
+
+@router.get('/incidents/{incident_id}/capture')
+def incident_capture(incident_id: int, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
+    """Primera captura de la incidencia, solo para quien puede ver ese taller."""
+    return _serve_capture(db, incident_id, current_user)

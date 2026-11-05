@@ -1,7 +1,7 @@
 # SafeVision: Sistema de Monitoreo de EPP para Laboratorios
 
 ## Descripción
-SafeVision es un sistema automatizado diseñado para la supervisión y monitoreo en tiempo real del uso correcto de Equipos de Protección Personal (EPP) en laboratorios de Química y Física. El sistema garantiza el cumplimiento de normas de seguridad mediante visión artificial.
+SafeVision es un prototipo académico de apoyo al personal de laboratorio. Durante una práctica activa verifica, mediante visión artificial, la **presencia visible** del Equipo de Protección Personal (EPP) exigido en laboratorios de Química y Física y envía alertas al encargado, que confirma o descarta cada una. No graba video y no reemplaza la supervisión humana.
 
 ## Objetivos
 - Automatizar la detección de EPP mediante el procesamiento de video.
@@ -35,6 +35,24 @@ Rutas principales, protegidas con JWT:
 - `POST /modules/reglas_lab/equipment`: ampliar el catálogo EPP (solo administrador).
 - `GET/POST /modules/reglas_lab/incidents`: consultar y registrar incidencias.
 - `PATCH /modules/reglas_lab/incidents/{id}/status`: actualizar su estado.
+
+Cada regla de un taller puede guardar su código y gravedad según el reglamento (`rules` en `PUT .../configuration`); si faltan, se usan `missing_code` e `impact` del catálogo. Los EPP sin detector (`model_class` vacío), como botas o vestimenta, se marcan como verificación manual y nunca generan alertas.
+
+Para aplicar la regla base de un reglamento revisado (por ahora `quimica-v3.1`) a un taller:
+
+```powershell
+python tools/aplicar_reglamento.py                                   # lista talleres
+python tools/aplicar_reglamento.py quimica-v3.1 --taller 2            # muestra el cambio
+python tools/aplicar_reglamento.py quimica-v3.1 --taller 2 --confirmar
+```
+
+### Monitoreo continuo (una práctica activa)
+- `POST /modules/reglas_lab/workshops/{id}/monitoring/start`: analiza todas las cámaras del taller **aunque nadie tenga abierta la página de Monitoreo**. Personas y puntos clave con `yolo11n-pose.pt` (se descarga solo la primera vez), EPP con `best.pt`.
+- `POST .../monitoring/stop` y `GET .../monitoring`: detener y consultar el estado (análisis hechos, alertas, espectadores).
+- Cada falta confirmada por el motor crea una incidencia `PENDIENTE` del sistema, con el código de regla vigente y una captura en `capturas/` (ignorada por Git) con la cabeza de **todas** las personas cubierta. El video no se graba: solo se escribe esa captura.
+- `GET /modules/reglas_lab/incidents/{id}/capture`: la captura, solo para quien puede ver ese taller.
+- Las reglas se leen al iniciar el monitoreo; si se cambian, detener e iniciar de nuevo.
+- **Fase de prueba:** al iniciar, el administrador puede marcar "Borrar incidencias anteriores de este taller" (`clear_previous`), que elimina sus incidencias, faltas y capturas. Para la versión final, desactivarlo con la variable de entorno `SAFEVISION_MODO_PRUEBA=0`.
 
 Las incidencias admiten clase/confianza YOLO y `bounding_box` (`[x1, y1, x2, y2]`) con dimensiones del frame. Estos campos quedan persistidos para que la interfaz pueda recuperar los datos al dibujar cajas propias. Las cámaras con incidencias históricas no se pueden eliminar.
 
@@ -77,6 +95,25 @@ python -m app.setup_db
 ```
 
 Esto crea o reinicia la base de datos y genera los usuarios y cámaras iniciales del sistema.
+> **Atención:** `app.setup_db` **borra** la base existente.
+
+### Crear el primer administrador
+No hay registro público: solo un administrador autenticado puede crear (`POST /modules/auth_db/users`) o modificar (`PATCH /modules/auth_db/users/{username}`) usuarios. Para crear el primero sin tocar los datos existentes:
+
+```powershell
+python tools/create_admin.py admin --full-name "Administrador Sistema"
+```
+
+La contraseña se pide por teclado (o se lee de `SAFEVISION_ADMIN_PASSWORD`). Si el usuario ya existe, no se modifica.
+
+### Base de datos local
+Por defecto se usa `safevison_baken/safevision.db`. La variable `LOCAL_DATABASE_URL` permite usar otra base SQLite, por ejemplo `sqlite:///C:/ruta/otra.db`.
+
+## Pruebas
+```powershell
+python -m unittest discover -s tests -t .
+```
+Las pruebas usan una base SQLite temporal y no modifican `safevision.db`. La prueba del umbral con YOLO real se omite si faltan `best.pt` o `videos/videoplayback.mp4`.
 
 ## Ejecución del backend
 Desde la carpeta principal del proyecto:

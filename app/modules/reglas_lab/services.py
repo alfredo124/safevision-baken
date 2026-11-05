@@ -1,6 +1,6 @@
 from sqlalchemy.orm import Session
 
-from app.core.database import Base, SessionLocal, engine
+from app.core.database import Base, SessionLocal, add_missing_columns, engine
 from app.modules.ai_vision.models import Camera
 from app.modules.reglas_lab.models import SafetyEquipment, Workshop, WorkshopCamera, WorkshopEquipmentRule
 
@@ -12,6 +12,8 @@ DEFAULT_EQUIPMENT = [
     {'id': 'arnes', 'name': 'Arnés anticaídas', 'slot': 'cuerpo', 'icon': '🪢', 'missing_code': 'ERR-EPP-04', 'missing_description': 'Operación en altura sin línea de vida o arnés normado', 'impact': 'CRÍTICO', 'model_class': None},
     {'id': 'guantes', 'name': 'Guantes Industriales', 'slot': 'manos', 'icon': '🧤', 'missing_code': 'ERR-EPP-05', 'missing_description': 'Manipulación de insumos químicos/térmicos sin guantes', 'impact': 'ALTO', 'model_class': 'gloves'},
     {'id': 'botas', 'name': 'Botas de Seguridad', 'slot': 'pies', 'icon': '🥾', 'missing_code': 'ERR-EPP-06', 'missing_description': 'Ingreso con calzado no normado o punta de acero', 'impact': 'MEDIO', 'model_class': None},
+    # Sin detector: se muestra como "Requerido, verificación manual" y nunca genera alertas.
+    {'id': 'vestimenta', 'name': 'Vestimenta adicional (zapatos cerrados, pantalón largo, cabello recogido)', 'slot': 'general', 'icon': '👞', 'missing_code': 'ERR-EPP-07', 'missing_description': 'Ingreso sin zapatos cerrados, pantalón largo o con el cabello suelto', 'impact': 'ALTO', 'model_class': None},
 ]
 
 
@@ -19,9 +21,18 @@ def initialize_reglas_lab() -> None:
     from app.modules.reglas_lab import models  # Register all module tables with shared metadata.
 
     Base.metadata.create_all(bind=engine)
+    add_missing_columns('lab_workshop_equipment_rules', {'rule_code': 'VARCHAR(40)', 'severity': 'VARCHAR(20)'})
+    add_missing_columns('lab_incidents', {
+        'rule_code': 'VARCHAR(40)', 'capture_path': 'VARCHAR(300)',
+        'reviewed_by': 'INTEGER', 'reviewed_at': 'DATETIME', 'review_reason': 'VARCHAR(300)',
+        'action_taken': 'VARCHAR(30)', 'track_id': 'INTEGER',
+    })
     with SessionLocal() as db:
-        if db.query(SafetyEquipment).count() == 0:
-            db.add_all(SafetyEquipment(**equipment) for equipment in DEFAULT_EQUIPMENT)
+        # Solo se añaden los equipos que faltan; los existentes no se modifican.
+        existing = {row.id for row in db.query(SafetyEquipment.id).all()}
+        missing = [equipment for equipment in DEFAULT_EQUIPMENT if equipment['id'] not in existing]
+        if missing:
+            db.add_all(SafetyEquipment(**equipment) for equipment in missing)
             db.commit()
 
         if db.query(Workshop).count() == 0:

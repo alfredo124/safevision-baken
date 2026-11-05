@@ -1,1 +1,31 @@
 /videos/cameras/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# Secretos y configuración local
+.env
+.env.*
+!.env.example
+
+# Bases de datos locales (SQLite)
+*.db
+*.db-journal
+*.sqlite3
+
+# Material sensible o pesado: videos de prueba, capturas, reglamentos, grabaciones
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.webm
+*.pdf
+/capturas/
+/grabaciones/
+
+# Modelos descargables automáticamente por Ultralytics (best.pt sí se versiona)
+yolo11n-pose.pt

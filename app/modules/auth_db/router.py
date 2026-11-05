@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 from app.core.database import SessionLocal, engine, Base
 from app.modules.auth_db import models, schemas
 from app.core.security import create_access_token, verify_password
+from app.modules.auth_db.dependencies import get_current_user, require_admin
 import bcrypt
 
 # Crear tablas
@@ -18,7 +19,7 @@ def get_db():
         db.close()
 
 @router.post('/users', response_model=schemas.UserResponse)
-def create_user(user: schemas.UserCreate, db: Session = Depends(get_db)):
+def create_user(user: schemas.UserCreate, db: Session = Depends(get_db), _admin=Depends(require_admin)):
     db_user = db.query(models.User).filter(models.User.username == user.username).first()
     if db_user:
         raise HTTPException(status_code=400, detail='Username already registered')
@@ -54,22 +55,22 @@ async def login(request: Request, db: Session = Depends(get_db)):
     return {'access_token': access_token, 'token_type': 'bearer', 'user': {'email': user.username, 'role': user.role.value}}
 
 @router.get("/me", response_model=schemas.UserResponse)
-def get_me(username: str, db: Session = Depends(get_db)):
-    user = db.query(models.User).filter(models.User.username == username).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="Usuario no encontrado")
-    return user
+def get_me(current_user=Depends(get_current_user)):
+    return current_user
 
 @router.patch("/users/{username}", response_model=schemas.UserResponse)
-def update_user(username: str, user_update: schemas.UserCreate, db: Session = Depends(get_db)):
+def update_user(
+    username: str,
+    user_update: schemas.UserUpdate,
+    db: Session = Depends(get_db),
+    _admin=Depends(require_admin),
+):
     db_user = db.query(models.User).filter(models.User.username == username).first()
     if not db_user:
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
-    
-    db_user.full_name = user_update.full_name
-    db_user.dni = user_update.dni
-    db_user.phone = user_update.phone
-    db_user.email = user_update.email
+
+    for field, value in user_update.model_dump(exclude_unset=True).items():
+        setattr(db_user, field, value)
     db.commit()
     db.refresh(db_user)
     return db_user

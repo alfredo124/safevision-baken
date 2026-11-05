@@ -28,3 +28,9 @@ def get_user_from_token(token: str):
 
 def get_current_user(token: str = Depends(oauth2_scheme)):
     return get_user_from_token(token)
+
+
+def require_admin(current_user=Depends(get_current_user)):
+    if current_user.role != models.UserRole.ADMINISTRADOR:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail='Solo el administrador puede gestionar usuarios')
+    return current_user

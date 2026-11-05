@@ -1,21 +1,54 @@
-import os
+"""Captura de video y análisis por cámara.
+
+Una sola captura y un solo análisis por cámara, sin importar cuántos clientes miren.
+El monitoreo (start_monitoring) es una suscripción del sistema: mantiene la cámara
+abierta y analizando aunque nadie tenga abierta la página de Monitoreo.
+Los frames solo viven en memoria; nunca se escriben en disco desde aquí.
+"""
 import logging
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
+from uuid import uuid4
 
 import cv2
-from ultralytics import YOLO
+
+from app.modules.reglas_lab.compliance import ComplianceConfig, ComplianceEngine, EquipmentRule
 
 logger = logging.getLogger(__name__)
+
+# Límite explícito de análisis por cámara. En la CPU de desarrollo, pose + best.pt
+# tardan ~0.7 s por frame, así que el ritmo real puede ser menor.
+MAX_PROCESSING_FPS = 2.0
+
+# Sincronización video/recuadros durante la práctica: el video se retrasa lo mismo
+# que tarda el análisis, para que cada recuadro coincida con el frame analizado.
+MAX_SYNC_DELAY = 4.0
+
+# Callback de incidencias: (camera_id, evento, frame, observación) -> None
+EventHandler = Callable[[int, object, object, object], None]
+
+
+@dataclass
+class MonitorState:
+    engine: ComplianceEngine
+    pipeline: object  # DetectorPipeline o un sustituto en pruebas
+    on_event: EventHandler
+    workshop_id: int | None = None
+    started_at: float = field(default_factory=time.time)
+    analyses: int = 0
+    events: int = 0
+    last_result: object | None = None
 
 
 @dataclass
 class CameraStream:
     camera_id: int
     stream_url: str
-    capture: cv2.VideoCapture
+    capture: object
     is_file: bool
     source_fps: float
     draw_boxes: bool
@@ -24,54 +57,125 @@ class CameraStream:
     condition: threading.Condition = field(default_factory=threading.Condition)
     stop_event: threading.Event = field(default_factory=threading.Event)
     latest_frame: object | None = None
+    latest_frame_ts: float = 0.0
     frame_sequence: int = 0
     processed_frame_sequence: int = 0
     latest_jpeg: bytes | None = None
     jpeg_sequence: int = 0
-    detections: list = field(default_factory=list)
-    detections_updated_at: float = 0.0
-    subscribers: int = 0
+    overlay: dict | None = None  # último mensaje del motor (temporal, no se guarda)
+    overlays: deque = field(default_factory=lambda: deque(maxlen=20))
+    due_overlay: dict | None = None
+    sync_delay: float = 0.0
+    jpeg_buffer: deque = field(default_factory=deque)  # (ts, jpeg) solo en memoria
+    live_jpeg: bytes | None = None  # sin retraso, para el modo "en vivo"
+    live_sequence: int = 0
+    subscriptions: set = field(default_factory=set)
+    monitor: MonitorState | None = None
     error: str | None = None
     inference_count: int = 0
     capture_thread: threading.Thread | None = None
     inference_thread: threading.Thread | None = None
 
+    @property
+    def subscribers(self) -> int:
+        return len(self.subscriptions)
+
+
+def _open_capture(stream_url: str):
+    is_file = Path(stream_url).is_file()
+    source = stream_url if is_file or not stream_url.isdigit() else int(stream_url)
+    return cv2.VideoCapture(source), is_file
+
 
 class VideoStreamProcessor:
-    def __init__(self, model_path='best.pt', image_size=512, jpeg_quality=75, confidence_floor=0.25):
-        project_root = Path(__file__).resolve().parents[3]
-        model_file = Path(model_path)
-        if not model_file.is_absolute():
-            model_file = project_root / model_file
-        self.model = YOLO(str(model_file))
+    def __init__(self, model_path='best.pt', image_size=640, jpeg_quality=75, confidence_floor=0.25,
+                 pose_model_path='yolo11n-pose.pt', capture_factory=None, pipeline_factory=None):
+        self.model_path = model_path
+        self.pose_model_path = pose_model_path
         self.image_size = image_size
         self.jpeg_quality = jpeg_quality
         self.confidence_floor = confidence_floor
         self.streams: dict[int, CameraStream] = {}
         self.lock = threading.RLock()
         self.inference_lock = threading.Lock()
-        self.latest_detections: dict[int, list] = {}
+        self._capture_factory = capture_factory or _open_capture
+        self._pipeline_factory = pipeline_factory
+        self._equipment_detector = None
+        self._model_lock = threading.Lock()
 
-    def subscribe(self, camera_id, stream_url, draw_boxes=True, confidence_threshold=0.5, processing_fps=10):
+    # ------------------------------------------------------------------ modelos
+    @property
+    def equipment_detector(self):
+        """best.pt, cargado al primer uso para no bloquear el arranque."""
+        with self._model_lock:
+            if self._equipment_detector is None:
+                from app.modules.ai_vision.detectors import EquipmentDetector
+                self._equipment_detector = EquipmentDetector(self.model_path)
+            return self._equipment_detector
+
+    def _new_pipeline(self):
+        if self._pipeline_factory:
+            return self._pipeline_factory()
+        from app.modules.ai_vision.detectors import DetectorPipeline, PersonTracker
+        return DetectorPipeline(self.equipment_detector, PersonTracker(self.pose_model_path), self.image_size)
+
+    def predict_options(self, confidence_threshold):
+        """Argumentos de YOLO para una cámara.
+
+        El umbral configurado en la cámara se respeta tal cual; confidence_floor
+        solo se usa si la cámara no tiene un umbral válido.
+        """
+        return {
+            'conf': self.effective_confidence(confidence_threshold),
+            'imgsz': self.image_size,
+            'max_det': 300,
+            'verbose': False,
+        }
+
+    def effective_confidence(self, confidence_threshold) -> float:
+        if confidence_threshold is None or not 0 < confidence_threshold <= 1:
+            confidence_threshold = self.confidence_floor
+        return float(confidence_threshold)
+
+    @staticmethod
+    def effective_fps(processing_fps) -> float:
+        try:
+            value = float(processing_fps)
+        except (TypeError, ValueError):
+            value = MAX_PROCESSING_FPS
+        return min(MAX_PROCESSING_FPS, max(0.5, value))
+
+    # ------------------------------------------------------------ suscripciones
+    def subscribe(self, camera_id, stream_url, draw_boxes=True, confidence_threshold=0.5, processing_fps=10,
+                  monitor=False) -> str:
+        """Registra un espectador (o el monitoreo, con monitor=True) y devuelve su identificador."""
+        token = f'monitor-{uuid4().hex}' if monitor else uuid4().hex
         with self.lock:
             stream = self.streams.get(camera_id)
             if stream and stream.stream_url == stream_url and not stream.stop_event.is_set():
-                stream.subscribers += 1
-                return
-            if stream:
-                self._stop_stream(stream)
+                stream.subscriptions.add(token)
+                return token
 
-            is_file = Path(stream_url).is_file()
-            source = stream_url if is_file or not stream_url.isdigit() else int(stream_url)
-            capture = cv2.VideoCapture(source)
-            if not capture.isOpened():
+        # Abrir la fuente puede tardar segundos: se hace fuera del lock para no
+        # congelar a los clientes de otras cámaras.
+        capture, is_file = self._capture_factory(stream_url)
+        if not capture.isOpened():
+            capture.release()
+            raise RuntimeError(f'No se pudo abrir la fuente de video: {stream_url}')
+        capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        source_fps = capture.get(cv2.CAP_PROP_FPS)
+        if not 1 <= source_fps <= 120:
+            source_fps = 25.0
+
+        with self.lock:
+            current = self.streams.get(camera_id)
+            if current and current.stream_url == stream_url and not current.stop_event.is_set():
+                # Otro cliente la abrió mientras tanto: se reutiliza esa.
                 capture.release()
-                raise RuntimeError(f'No se pudo abrir la fuente de video: {stream_url}')
-            capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-            source_fps = capture.get(cv2.CAP_PROP_FPS)
-            if not 1 <= source_fps <= 120:
-                source_fps = 25.0
-
+                current.subscriptions.add(token)
+                return token
+            if current:
+                self._stop_stream(current)
             stream = CameraStream(
                 camera_id=camera_id,
                 stream_url=stream_url,
@@ -80,35 +184,115 @@ class VideoStreamProcessor:
                 source_fps=source_fps,
                 draw_boxes=draw_boxes,
                 confidence_threshold=confidence_threshold,
-                processing_fps=min(2, max(1, processing_fps)),
-                subscribers=1,
+                processing_fps=self.effective_fps(processing_fps),
+                subscriptions={token},
             )
             stream.capture_thread = threading.Thread(
-                target=self._capture_loop, args=(stream,), daemon=True,
-                name=f'camera-capture-{camera_id}',
+                target=self._capture_loop, args=(stream,), daemon=True, name=f'camera-capture-{camera_id}',
             )
             stream.inference_thread = threading.Thread(
-                target=self._inference_loop, args=(stream,), daemon=True,
-                name=f'camera-inference-{camera_id}',
+                target=self._inference_loop, args=(stream,), daemon=True, name=f'camera-inference-{camera_id}',
             )
             self.streams[camera_id] = stream
             stream.capture_thread.start()
             stream.inference_thread.start()
+        return token
 
-    def get_frame(self, camera_id, after_sequence=0, timeout=5):
+    def unsubscribe(self, camera_id, token=None):
+        """Da de baja una suscripción. Una baja de un stream anterior no afecta al actual."""
+        with self.lock:
+            stream = self.streams.get(camera_id)
+            if not stream:
+                return
+            if token is None:
+                # Compatibilidad: sin identificador se quita una suscripción de espectador.
+                viewer_tokens = [t for t in stream.subscriptions if not t.startswith('monitor-')]
+                if not viewer_tokens:
+                    return
+                token = viewer_tokens[0]
+            if token not in stream.subscriptions:
+                return
+            stream.subscriptions.discard(token)
+            if stream.subscriptions:
+                return
+            self.streams.pop(camera_id, None)
+            self._stop_stream(stream)
+
+    def release_camera(self, camera_id):
+        with self.lock:
+            stream = self.streams.pop(camera_id, None)
+            if stream:
+                self._stop_stream(stream)
+
+    # --------------------------------------------------------------- monitoreo
+    def start_monitoring(self, camera_id, stream_url, rules: list[EquipmentRule], on_event: EventHandler,
+                         confidence_threshold=0.5, processing_fps=MAX_PROCESSING_FPS, workshop_id=None,
+                         config: ComplianceConfig | None = None) -> bool:
+        """Inicia el análisis continuo de una cámara. Devuelve False si ya estaba activo."""
+        with self.lock:
+            stream = self.streams.get(camera_id)
+            if stream and stream.monitor and not stream.stop_event.is_set():
+                return False
+        monitor = MonitorState(ComplianceEngine(rules, config), self._new_pipeline(), on_event, workshop_id)
+        self.subscribe(camera_id, stream_url, confidence_threshold=confidence_threshold,
+                       processing_fps=processing_fps, monitor=True)
+        with self.lock:
+            stream = self.streams[camera_id]
+            with stream.condition:
+                stream.monitor = monitor
+        return True
+
+    def stop_monitoring(self, camera_id) -> bool:
+        with self.lock:
+            stream = self.streams.get(camera_id)
+            if not stream or not stream.monitor:
+                return False
+            with stream.condition:
+                stream.monitor = None
+            tokens = [t for t in stream.subscriptions if t.startswith('monitor-')]
+        for token in tokens:
+            self.unsubscribe(camera_id, token)
+        return True
+
+    def monitoring_status(self, camera_id) -> dict | None:
+        with self.lock:
+            stream = self.streams.get(camera_id)
+        if not stream or not stream.monitor:
+            return None
+        monitor = stream.monitor
+        return {
+            'camera_id': camera_id,
+            'workshop_id': monitor.workshop_id,
+            'running': not stream.stop_event.is_set(),
+            'error': stream.error,
+            'analyses': monitor.analyses,
+            'events': monitor.events,
+            'viewers': sum(not t.startswith('monitor-') for t in stream.subscriptions),
+            'started_at': monitor.started_at,
+            # Para la barra de sincronización del frontend.
+            'sync_delay': round(stream.sync_delay, 2),
+            'analysis_rate': round(monitor.analyses / max(1.0, time.time() - monitor.started_at), 2),
+        }
+
+    # ----------------------------------------------------------------- frames
+    def get_frame(self, camera_id, after_sequence=0, timeout=5, live=False):
+        """Siguiente JPEG. live=True: sin el retraso de sincronización (recuadros atrasados)."""
         with self.lock:
             stream = self.streams.get(camera_id)
         if not stream:
             return None, [], after_sequence
 
+        def sequence():
+            return stream.live_sequence if live else stream.jpeg_sequence
+
         with stream.condition:
             stream.condition.wait_for(
-                lambda: stream.jpeg_sequence > after_sequence or stream.error or stream.stop_event.is_set(),
+                lambda: sequence() > after_sequence or stream.error or stream.stop_event.is_set(),
                 timeout=timeout,
             )
-            if stream.jpeg_sequence <= after_sequence:
-                return None, stream.detections, after_sequence
-            return stream.latest_jpeg, stream.detections, stream.jpeg_sequence
+            if sequence() <= after_sequence:
+                return None, [], after_sequence
+            return (stream.live_jpeg if live else stream.latest_jpeg), [], sequence()
 
     def _capture_loop(self, stream: CameraStream):
         frame_interval = 1 / stream.source_fps if stream.is_file else 0
@@ -127,27 +311,22 @@ class VideoStreamProcessor:
                         stream.condition.notify_all()
                     break
 
+                captured_at = time.monotonic()
                 with stream.condition:
                     stream.latest_frame = frame
+                    stream.latest_frame_ts = captured_at
                     stream.frame_sequence += 1
-                    detections = list(stream.detections)
-                    detection_age = time.monotonic() - stream.detections_updated_at
-                    if detections and detection_age > 1.0:
-                        detections = []
-                        stream.detections = []
-                        self.latest_detections[stream.camera_id] = []
+                    has_viewers = any(not t.startswith('monitor-') for t in stream.subscriptions)
+                    delay = stream.sync_delay if stream.monitor else 0.0
 
-                output_frame = frame.copy()
-                if stream.draw_boxes:
-                    self._draw_detections(output_frame, detections)
-                encoded, buffer = cv2.imencode(
-                    '.jpg', output_frame,
-                    [cv2.IMWRITE_JPEG_QUALITY, self.jpeg_quality],
-                )
-                if encoded:
+                # Solo se comprime a JPEG si alguien está mirando. El video sale limpio:
+                # los recuadros los dibuja el frontend con el mensaje del motor (Tarea 1C).
+                if has_viewers:
+                    encoded, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, self.jpeg_quality])
+                    if encoded:
+                        self._publish_jpeg(stream, captured_at, buffer.tobytes(), delay)
+                else:
                     with stream.condition:
-                        stream.latest_jpeg = buffer.tobytes()
-                        stream.jpeg_sequence += 1
                         stream.condition.notify_all()
 
                 if frame_interval:
@@ -173,6 +352,13 @@ class VideoStreamProcessor:
         next_inference_at = 0.0
         interval = 1 / stream.processing_fps
         while not stream.stop_event.is_set():
+            if stream.monitor is None:
+                # Sin práctica iniciada no se analiza: no hay alertas fuera de la práctica.
+                with stream.condition:
+                    stream.sync_delay, stream.due_overlay = 0.0, None
+                    stream.overlays.clear()
+                stream.stop_event.wait(interval)
+                continue
             with stream.condition:
                 ready = stream.condition.wait_for(
                     lambda: stream.stop_event.is_set() or (
@@ -185,35 +371,25 @@ class VideoStreamProcessor:
                     return
                 if not ready or stream.latest_frame is None:
                     continue
+                # Siempre el último frame: si el análisis va atrasado se descartan los intermedios.
+                frame = stream.latest_frame.copy()
+                frame_ts = stream.latest_frame_ts
+                last_frame_sequence = stream.frame_sequence
+                monitor = stream.monitor
+            if monitor is None:
+                continue
 
             try:
-                with self.inference_lock:
-                    with stream.condition:
-                        frame = stream.latest_frame.copy()
-                        last_frame_sequence = stream.frame_sequence
-                    result = self.model.predict(
-                        frame,
-                        conf=min(stream.confidence_threshold, self.confidence_floor),
-                        imgsz=self.image_size,
-                        vid_stride=1,
-                        max_det=300,
-                        verbose=False,
-                    )[0]
-                detections = []
-                for box in result.boxes:
-                    class_id = int(box.cls[0])
-                    detections.append({
-                        'box': box.xyxy[0].tolist(),
-                        'conf': float(box.conf[0]),
-                        'class': class_id,
-                        'name': self.model.names[class_id],
-                    })
+                overlay = self._analyze_for_monitoring(stream, monitor, frame, frame_ts)
+                latency = time.monotonic() - frame_ts
                 with stream.condition:
-                    stream.detections = detections
-                    stream.detections_updated_at = time.monotonic()
+                    stream.overlay = overlay
+                    stream.overlays.append(overlay)
+                    # Sube rápido si el análisis tarda más; baja despacio para no dar saltos.
+                    target = min(MAX_SYNC_DELAY, latency + 0.15)
+                    stream.sync_delay = target if target > stream.sync_delay else 0.95 * stream.sync_delay + 0.05 * target
                     stream.inference_count += 1
                     stream.processed_frame_sequence = last_frame_sequence
-                    self.latest_detections[stream.camera_id] = detections
                     stream.condition.notify_all()
                 next_inference_at = time.monotonic() + interval
             except Exception as error:
@@ -224,39 +400,73 @@ class VideoStreamProcessor:
                     stream.condition.notify_all()
                 return
 
+    def _analyze_for_monitoring(self, stream: CameraStream, monitor: MonitorState, frame,
+                                frame_ts: float | None = None) -> dict:
+        frame_ts = frame_ts if frame_ts is not None else time.monotonic()
+        observation = monitor.pipeline.analyze(
+            frame, frame_ts, self.effective_confidence(stream.confidence_threshold),
+        )
+        result = monitor.engine.update(observation)
+        monitor.analyses += 1
+        monitor.last_result = result
+        for event in result.events:
+            monitor.events += 1
+            try:
+                monitor.on_event(stream.camera_id, event, frame, observation)
+            except Exception:
+                # Un fallo al guardar no debe detener el análisis de la cámara.
+                logger.exception('No se pudo registrar la incidencia de la cámara %s.', stream.camera_id)
+        from app.modules.reglas_lab.overlay import build_overlay_message
+        message = build_overlay_message(
+            stream.camera_id, monitor.analyses, time.time(), observation, result,
+            monitor.engine.rules + monitor.engine.unsupported_rules,
+        )
+        message['frame_ts'] = frame_ts
+        return message
+
     @staticmethod
-    def _draw_detections(frame, detections):
-        for detection in detections:
-            x1, y1, x2, y2 = map(int, detection['box'])
-            label = f"{detection['name']} {detection['conf']:.2f}"
-            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 200, 0), 2)
-            cv2.putText(frame, label, (x1, max(y1 - 8, 0)), cv2.FONT_HERSHEY_SIMPLEX,
-                        0.5, (0, 200, 0), 2)
+    def _publish_jpeg(stream: CameraStream, captured_at: float, jpeg: bytes, delay: float) -> None:
+        """Publica el frame para los espectadores, retrasado `delay` s durante la práctica."""
+        with stream.condition:
+            stream.live_jpeg = jpeg
+            stream.live_sequence += 1
+            if delay <= 0:
+                stream.jpeg_buffer.clear()
+                ready = jpeg
+            else:
+                stream.jpeg_buffer.append((captured_at, jpeg))
+                limit = time.monotonic() - delay
+                ready = None
+                while stream.jpeg_buffer and stream.jpeg_buffer[0][0] <= limit:
+                    ready = stream.jpeg_buffer.popleft()[1]
+                # Nunca acumular más de MAX_SYNC_DELAY de video en memoria.
+                while stream.jpeg_buffer and captured_at - stream.jpeg_buffer[0][0] > MAX_SYNC_DELAY:
+                    ready = stream.jpeg_buffer.popleft()[1]
+            if ready is not None:
+                stream.latest_jpeg = ready
+                stream.jpeg_sequence += 1
+            stream.condition.notify_all()
+
+    def latest_overlay(self, camera_id, live=False) -> dict | None:
+        """Mensaje del motor que corresponde al frame que ven ahora los espectadores
+        (el video va retrasado `sync_delay`). None si no hay práctica en curso."""
+        with self.lock:
+            stream = self.streams.get(camera_id)
+        if not stream or not stream.monitor or stream.stop_event.is_set():
+            return None
+        with stream.condition:
+            if live:
+                return stream.overlay  # el más reciente, aunque el video vaya por delante
+            limit = time.monotonic() - stream.sync_delay
+            for overlay in stream.overlays:
+                if overlay.get('frame_ts', 0) <= limit:
+                    stream.due_overlay = overlay
+            return stream.due_overlay
 
     def _stop_stream(self, stream: CameraStream):
         stream.stop_event.set()
         with stream.condition:
             stream.condition.notify_all()
-        stream.capture.release()
-
-    def unsubscribe(self, camera_id):
-        with self.lock:
-            stream = self.streams.get(camera_id)
-            if not stream:
-                return
-            stream.subscribers -= 1
-            if stream.subscribers > 0:
-                return
-            self.streams.pop(camera_id, None)
-            self.latest_detections.pop(camera_id, None)
-            self._stop_stream(stream)
-
-    def release_camera(self, camera_id):
-        with self.lock:
-            stream = self.streams.pop(camera_id, None)
-            self.latest_detections.pop(camera_id, None)
-            if stream:
-                self._stop_stream(stream)
 
 
 video_processor = VideoStreamProcessor()

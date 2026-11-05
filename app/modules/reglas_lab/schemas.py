@@ -6,7 +6,12 @@ from pydantic import BaseModel, ConfigDict, Field
 
 LaboratoryType = Literal['QUIMICA', 'FISICA']
 Severity = Literal['CRÍTICO', 'ALTO', 'MEDIO']
-IncidentStatus = Literal['PENDIENTE', 'EN_REVISION', 'ATENDIDO']
+# PENDIENTE = alerta sin revisar. CONFIRMADA / DESCARTADA las fija el encargado o el
+# administrador (Tarea 2A). EN_REVISION y ATENDIDO se conservan por datos anteriores.
+IncidentStatus = Literal['PENDIENTE', 'EN_REVISION', 'CONFIRMADA', 'DESCARTADA', 'ATENDIDO']
+ManualStatus = Literal['PENDIENTE', 'EN_REVISION', 'ATENDIDO']
+ReviewDecision = Literal['CONFIRMADA', 'DESCARTADA']
+ReviewAction = Literal['CORREGIDO', 'RETIRADO_DE_PRACTICA']
 
 
 class SafetyEquipmentCreate(BaseModel):
@@ -39,6 +44,19 @@ class CameraSummary(BaseModel):
     status: str
 
 
+class WorkshopRule(BaseModel):
+    equipment_id: str = Field(min_length=1, max_length=80)
+    rule_code: str | None = Field(default=None, max_length=40)
+    severity: Severity | None = None
+
+
+class WorkshopRuleResponse(BaseModel):
+    equipment_id: str
+    rule_code: str
+    severity: Severity
+    manual_verification: bool
+
+
 class WorkshopResponse(BaseModel):
     id: int
     name: str
@@ -46,6 +64,7 @@ class WorkshopResponse(BaseModel):
     description: str | None
     cameras: list[CameraSummary]
     required_equipment_ids: list[str]
+    rules: list[WorkshopRuleResponse] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
 
@@ -53,6 +72,8 @@ class WorkshopResponse(BaseModel):
 class WorkshopConfigurationUpdate(BaseModel):
     camera_ids: list[int] = Field(default_factory=list)
     required_equipment_ids: list[str] = Field(default_factory=list)
+    # Opcional: código y gravedad por EPP. Si se envía, reemplaza a required_equipment_ids.
+    rules: list[WorkshopRule] | None = None
 
 
 class RulesConfigurationResponse(BaseModel):
@@ -77,7 +98,23 @@ class IncidentCreate(BaseModel):
 
 
 class IncidentStatusUpdate(BaseModel):
-    status: IncidentStatus
+    status: ManualStatus
+
+
+class IncidentReview(BaseModel):
+    decision: ReviewDecision
+    action: ReviewAction | None = None  # obligatoria al confirmar
+    reason: str | None = Field(default=None, max_length=300)  # opcional al descartar
+
+
+class IncidentFaultResponse(BaseModel):
+    id: int | None  # None en incidencias anteriores a la agrupación
+    equipment_id: str | None
+    equipment_name: str | None
+    rule_code: str | None
+    severity: Severity
+    has_capture: bool
+    detected_at: datetime
 
 
 class IncidentResponse(BaseModel):
@@ -99,3 +136,15 @@ class IncidentResponse(BaseModel):
     frame_width: int | None
     frame_height: int | None
     occurred_at: datetime
+    rule_code: str | None = None
+    has_capture: bool = False
+    created_by_system: bool = False
+    reviewed_by_name: str | None = None
+    reviewed_at: datetime | None = None
+    review_reason: str | None = None
+    action_taken: ReviewAction | None = None
+    faults: list[IncidentFaultResponse] = Field(default_factory=list)
+
+class MonitoringStart(BaseModel):
+    # Fase de prueba: borrar antes las incidencias del taller (solo administrador).
+    clear_previous: bool = False
