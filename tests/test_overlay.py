@@ -52,7 +52,7 @@ class OverlayMessageTest(unittest.TestCase):
         self.assertEqual(message['analysis_id'], 42)
         person = message['people'][0]
         self.assertEqual(person['state'], 'INCUMPLE')
-        self.assertEqual(person['color'], '#ef4444')
+        self.assertEqual(person['color'], '#f59e0b')  # ALTO = ámbar, igual que la web
         self.assertEqual({m['rule_code'] for m in person['missing']}, {'RLQ-2.3', 'RLQ-2.2'})
         self.assertEqual(person['box'], list(BOX))
         self.assertEqual([m['equipment_id'] for m in person['manual']], ['vestimenta'])
@@ -72,7 +72,7 @@ class OverlayMessageTest(unittest.TestCase):
     def test_at_risk_message(self):
         person = message_after(4, posed(), lambda now: [face_goggles()])['people'][0]
         self.assertEqual(person['state'], 'EN_RIESGO')
-        self.assertEqual(person['color'], '#f59e0b')
+        self.assertEqual(person['color'], '#38bdf8')  # en riesgo = azul: aún no es falta
         self.assertEqual(person['at_risk'][0]['rule_code'], 'RLQ-2.3')
         self.assertGreater(person['progress'], 0)
 

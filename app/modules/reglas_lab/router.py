@@ -108,7 +108,7 @@ def _faults_by_incident(db: Session, incidents: list) -> dict[int, list[dict]]:
         result[row.incident_id].append({
             'id': row.id, 'equipment_id': row.equipment_id, 'equipment_name': names.get(row.equipment_id),
             'rule_code': row.rule_code, 'severity': row.severity, 'has_capture': bool(row.capture_path),
-            'detected_at': _as_utc(row.detected_at),
+            'detected_at': _as_utc(row.detected_at), 'detail': row.detail,
         })
     for incident in incidents:
         if not result[incident.id]:

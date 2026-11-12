@@ -15,7 +15,10 @@ from sqlalchemy.orm import Session
 from app.core import events
 from app.modules.ai_vision.models import Camera
 from app.modules.reglas_lab import models
-from app.modules.reglas_lab.compliance import EquipmentRule, ViolationEvent
+from app.modules.reglas_lab.compliance import DETAIL_COAT_OPEN, DETAIL_GOGGLES_OFF, EquipmentRule, ViolationEvent
+
+# Texto de una falta según su detalle: el EPP falta o está mal puesto.
+DETAIL_TEXT = {DETAIL_COAT_OPEN: 'abierta (sin abotonar)', DETAIL_GOGGLES_OFF: 'fuera de los ojos'}
 
 
 @dataclass(frozen=True)
@@ -91,12 +94,22 @@ def _refresh_summary(db: Session, incident: models.Incident) -> None:
     }
     labels = [names.get(f.equipment_id, f.equipment_id or 'EPP') for f in faults]
     codes = ', '.join(f.rule_code for f in faults if f.rule_code) or '-'
-    incident.title = (f'{labels[0]}: no se detecta' if len(labels) == 1
-                      else f'Faltan {len(labels)} EPP: {", ".join(labels)}')[:160]
+    missing = [label for f, label in zip(faults, labels) if f.detail not in DETAIL_TEXT]
+    wrong = [f'{label} {DETAIL_TEXT[f.detail]}' for f, label in zip(faults, labels) if f.detail in DETAIL_TEXT]
+    if len(faults) == 1:
+        incident.title = (f'{labels[0]}: {DETAIL_TEXT[faults[0].detail]}' if wrong
+                          else f'{labels[0]}: no se detecta')[:160]
+    else:
+        incident.title = f'Faltan {len(labels)} EPP: {", ".join(missing + wrong)}'[:160]
     incident.severity = max((f.severity for f in faults), key=lambda value: SEVERITY_ORDER.get(value, 0))
+    found = []
+    if missing:
+        found.append(f'el sistema no detectó {", ".join(label.lower() for label in missing)}')
+    if wrong:
+        found.append(f'detectó {", ".join(text.lower() for text in wrong)}')
     incident.description = (
-        f'Reglas {codes}: el sistema no detectó {", ".join(label.lower() for label in labels)} '
-        f'en zonas visibles de la misma persona. Pendiente de validación del encargado.'
+        f'Reglas {codes}: {" y ".join(found)} en zonas visibles de la misma persona. '
+        f'Pendiente de validación del encargado.'
     )[:1000]
 
 
@@ -138,8 +151,9 @@ def record_system_fault(
     window = GROUP_SECONDS if group_seconds is None else group_seconds
     incident = _open_alert_for(db, camera_id, event, now, window)
     equipment = db.query(models.SafetyEquipment).filter_by(id=event.equipment_id).first()
-    if incident is not None and any(f.equipment_id == event.equipment_id for f in incident_faults(db, incident)):
-        return incident  # esa falta ya está en la alerta
+    if incident is not None and any(f.equipment_id == event.equipment_id and f.detail == event.detail
+                                    for f in incident_faults(db, incident)):
+        return incident  # esa falta ya está en la alerta (una bata abierta que pasa a ausente sí se añade)
 
     if incident is None:
         camera = db.query(Camera).filter_by(id=camera_id).first()
@@ -174,6 +188,7 @@ def record_system_fault(
         rule_code=event.rule_code,
         severity=event.severity,
         present_ratio=round(event.present_ratio, 3),
+        detail=event.detail,
         detected_at=now,
     )
     db.add(fault)

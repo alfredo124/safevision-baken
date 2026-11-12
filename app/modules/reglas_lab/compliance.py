@@ -44,6 +44,14 @@ class _Sample(Enum):
     PRESENT = 'present'
     ABSENT = 'absent'
     UNKNOWN = 'unknown'
+    # EPP detectado pero mal puesto (bata abierta). Para el cumplimiento cuenta como
+    # no presente; al confirmar la falta decide si es leve (mal puesto) o grave (ausente).
+    PARTIAL = 'partial'
+
+
+# Detalle de una falta cuando el EPP está, pero mal puesto (falta leve: se corrige en el momento).
+DETAIL_COAT_OPEN = 'BATA_ABIERTA'
+DETAIL_GOGGLES_OFF = 'LENTES_MAL_PUESTOS'  # lentes en la frente, el cuello o la mano, no en los ojos
 
 
 @dataclass(frozen=True)
@@ -107,7 +115,21 @@ class ComplianceConfig:
     min_keypoint_confidence: float = 0.5
     glove_max_wrist_distance: float = 0.08
     goggles_max_face_distance: float = 0.06
-    min_coat_torso_coverage: float = 0.5
+    # Bata cerrada (abotonada): confianza y cobertura del torso altas. Calibrado el
+    # 2026-11-10 con los videos de cámara fija de los compañeros: cerrada 146/148
+    # muestras; sin bata 6/115 y abierta 7/81 superan ambos umbrales.
+    min_coat_torso_coverage: float = 0.8
+    coat_closed_min_confidence: float = 0.7
+    # Bata detectada que no cumple lo anterior = abierta, si cubre algo del torso.
+    coat_open_min_coverage: float = 0.2
+    # Lentes detectados cerca de la persona (hasta esta distancia de la cara, relativa a su
+    # altura: frente, cabeza, cuello, mano) pero no sobre los ojos = lentes mal puestos.
+    goggles_misplaced_max_distance: float = 0.45
+    # Al confirmar la falta: si al menos esta proporción de las muestras sin el EPP bien puesto
+    # lo vio mal puesto (bata abierta, lentes fuera de los ojos), la falta es leve; si no, es grave
+    # (sin el EPP). Sin bata, ~53 % de los frames no detecta nada.
+    misplaced_min_ratio: float = 0.8
+    misplaced_severity: str = 'MEDIO'
     # Sin caderas visibles se evalúa la parte alta del torso (0 = desactivado). Calibrar.
     coat_upper_torso_ratio: float = 0.8
 
@@ -129,6 +151,8 @@ class ViolationEvent:
     person_box: Box
     present_ratio: float
     rule_code: str | None = None
+    # None = el EPP falta; DETAIL_COAT_OPEN / DETAIL_GOGGLES_OFF = está, pero mal puesto.
+    detail: str | None = None
 
 
 @dataclass(frozen=True)
@@ -138,6 +162,9 @@ class PersonEquipmentStatus:
     state: ComplianceState
     present_ratio: float | None
     progress: float = 0.0  # 0..1 hacia la confirmación de la falta (EN_RIESGO / INCUMPLE)
+    # Solo con INCUMPLE: gravedad de la falta (puede ser menor que la de la regla) y detalle.
+    severity: str | None = None
+    detail: str | None = None
 
 
 @dataclass(frozen=True)
@@ -153,6 +180,7 @@ class _RuleTrack:
     state: ComplianceState = ComplianceState.NOT_VERIFIABLE
     violation_started_at: float | None = None
     alerted: bool = False
+    alert_detail: str | None = None  # detalle de la última alerta emitida
     verified_span: float = 0.0
     verified_count: int = 0
 
@@ -296,7 +324,13 @@ class ComplianceEngine:
                     sample = _Sample.ABSENT
                 ratio = self._advance(rule_track, frame.timestamp, sample)
                 display, progress = self._display_state(rule_track, ratio)
-                statuses.append(PersonEquipmentStatus(person.track_id, rule.equipment_id, display, ratio, progress))
+                severity = detail = None
+                if display is ComplianceState.VIOLATION:
+                    detail = self._violation_detail(rule_track, rule)
+                    severity = self.config.misplaced_severity if detail else rule.severity
+                statuses.append(PersonEquipmentStatus(
+                    person.track_id, rule.equipment_id, display, ratio, progress, severity, detail,
+                ))
                 event = self._maybe_emit(person, rule, rule_track, frame.timestamp, ratio)
                 if event:
                     events.append(event)
@@ -362,18 +396,21 @@ class ComplianceEngine:
         for rule in self.rules:
             parts = {person.track_id: self._visible_parts(person, rule.slot) for person in persons}
             covered: dict[int, set] = {track_id: set() for track_id in parts}
+            partial: dict[int, set] = {track_id: set() for track_id in parts}
             for item in equipment:
                 if item.name != rule.model_class or item.confidence < config.min_equipment_confidence:
                     continue
                 # Cada objeto va solo a la persona más compatible; dentro de ella
                 # cubre todas las partes que alcance (por ejemplo, dos manos juntas).
                 best: tuple[float, int, set] | None = None
+                misplaced: tuple[float, int] | None = None  # lentes cerca, pero no en los ojos
+                closed = True
                 for track_id, person_parts in parts.items():
                     matched, best_cost = set(), None
                     for name, part in person_parts.items():
                         if rule.slot in SLOT_BODY:
                             coverage = _coverage(part, item.box)
-                            ok, cost = coverage >= config.min_coat_torso_coverage, 1.0 - coverage
+                            ok, cost = coverage >= config.coat_open_min_coverage, 1.0 - coverage
                         else:
                             limit = (config.glove_max_wrist_distance if rule.slot in SLOT_HANDS
                                      else config.goggles_max_face_distance)
@@ -384,14 +421,26 @@ class ComplianceEngine:
                             best_cost = cost if best_cost is None else min(best_cost, cost)
                     if matched and (best is None or best_cost < best[0]):
                         best = (best_cost, track_id, matched)
+                    elif not matched and rule.slot in SLOT_HEAD and person_parts:
+                        cost = min(_point_box_distance(part, item.box) for part in person_parts.values()) / heights[track_id]
+                        if cost <= config.goggles_misplaced_max_distance and (misplaced is None or cost < misplaced[0]):
+                            misplaced = (cost, track_id)
+                if not best and misplaced:
+                    partial[misplaced[1]] |= set(parts[misplaced[1]])
                 if best:
-                    covered[best[1]] |= best[2]
+                    if rule.slot in SLOT_BODY:
+                        # Cerrada: cubre casi todo el torso con confianza alta. Si no, abierta.
+                        closed = (1.0 - best[0] >= config.min_coat_torso_coverage
+                                  and item.confidence >= config.coat_closed_min_confidence)
+                    (covered if closed else partial)[best[1]] |= best[2]
 
             for track_id, person_parts in parts.items():
                 if not person_parts:
                     sample = _Sample.UNKNOWN
                 elif set(person_parts) <= covered[track_id]:
                     sample = _Sample.PRESENT
+                elif set(person_parts) <= covered[track_id] | partial[track_id]:
+                    sample = _Sample.PARTIAL
                 else:
                     sample = _Sample.ABSENT
                 samples[(track_id, rule.equipment_id)] = sample
@@ -468,7 +517,12 @@ class ComplianceEngine:
     def _maybe_emit(
         self, person: PersonDetection, rule: EquipmentRule, track: _RuleTrack, now: float, ratio: float | None,
     ) -> ViolationEvent | None:
-        if track.state is not ComplianceState.VIOLATION or track.alerted:
+        if track.state is not ComplianceState.VIOLATION:
+            return None
+        detail = self._violation_detail(track, rule)
+        # Una falta leve (bata abierta) que pasa a grave (se quita la bata) se avisa otra vez.
+        escalated = track.alerted and track.alert_detail is not None and detail is None
+        if track.alerted and not escalated:
             return None
         recent = [
             entry for entry in self._recent_events.get(rule.equipment_id, [])
@@ -476,24 +530,36 @@ class ComplianceEngine:
         ]
         self._recent_events[rule.equipment_id] = recent
         # Un cambio de track_id no debe duplicar la alerta de la misma persona.
-        if any(
+        if not escalated and any(
             entry[1] == person.track_id or _iou(entry[2], person.box) >= self.config.same_person_iou
             for entry in recent
         ):
             return None
         track.alerted = True
+        track.alert_detail = detail
         recent.append((now, person.track_id, person.box))
         return ViolationEvent(
             track_id=person.track_id,
             equipment_id=rule.equipment_id,
             model_class=rule.model_class or '',
-            severity=rule.severity,
+            severity=self.config.misplaced_severity if detail else rule.severity,
             timestamp=now,
             started_at=track.violation_started_at or now,
             person_box=person.box,
             present_ratio=ratio if ratio is not None else 0.0,
             rule_code=rule.rule_code,
+            detail=detail,
         )
+
+    def _violation_detail(self, track: _RuleTrack, rule: EquipmentRule) -> str | None:
+        """Detalle de "mal puesto" si casi todas las muestras sin el EPP correcto lo vieron mal puesto."""
+        missing = [s for _, s in track.samples if s in (_Sample.ABSENT, _Sample.PARTIAL)]
+        if not missing:
+            return None
+        share = sum(s is _Sample.PARTIAL for s in missing) / len(missing)
+        if share < self.config.misplaced_min_ratio:
+            return None
+        return DETAIL_COAT_OPEN if rule.slot in SLOT_BODY else DETAIL_GOGGLES_OFF if rule.slot in SLOT_HEAD else None
 
     def _forget_stale(self, now: float) -> None:
         stale = [

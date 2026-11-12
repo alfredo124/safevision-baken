@@ -39,6 +39,7 @@ def initialize_reglas_lab() -> None:
 
     Base.metadata.create_all(bind=engine)
     add_missing_columns('lab_workshop_equipment_rules', {'rule_code': 'VARCHAR(40)', 'severity': 'VARCHAR(20)'})
+    add_missing_columns('lab_incident_faults', {'detail': 'VARCHAR(40)'})
     add_missing_columns('lab_incidents', {
         'rule_code': 'VARCHAR(40)', 'capture_path': 'VARCHAR(300)',
         'reviewed_by': 'INTEGER', 'reviewed_at': 'DATETIME', 'review_reason': 'VARCHAR(300)',

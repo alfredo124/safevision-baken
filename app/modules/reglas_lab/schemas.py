@@ -115,6 +115,7 @@ class IncidentFaultResponse(BaseModel):
     severity: Severity
     has_capture: bool
     detected_at: datetime
+    detail: str | None = None  # BATA_ABIERTA: el EPP está, pero mal puesto
 
 
 class IncidentResponse(BaseModel):

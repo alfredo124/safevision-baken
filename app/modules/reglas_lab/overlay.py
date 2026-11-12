@@ -9,13 +9,13 @@ from __future__ import annotations
 from app.modules.reglas_lab.compliance import ComplianceResult, ComplianceState, EquipmentRule, FrameObservation
 
 COLORS = {
-    'INCUMPLE': '#ef4444',
-    'EN_RIESGO': '#f59e0b',
+    'INCUMPLE': '#f59e0b',
+    'EN_RIESGO': '#38bdf8',  # azul: acumulando evidencia, aún no es falta
     'CUMPLE': '#10b981',
     'PARCIAL': '#cbd5e1',  # gris claro: persona presente, verificación parcial
 }
-# Color de la falta confirmada según la gravedad de la norma.
-SEVERITY_COLORS = {'CRÍTICO': '#dc2626', 'ALTO': '#ef4444', 'MEDIO': '#f97316'}
+# Color de la falta confirmada según su gravedad; igual que la web (src/services/severity.ts).
+SEVERITY_COLORS = {'CRÍTICO': '#ef4444', 'ALTO': '#f59e0b', 'MEDIO': '#eab308'}
 SEVERITY_ORDER = {'CRÍTICO': 3, 'ALTO': 2, 'MEDIO': 1}
 
 
@@ -38,7 +38,8 @@ def build_overlay_message(camera_id: int, analysis_id: int, timestamp: float, ob
             if not rule.model_class:
                 manual.append(entry)  # verificación manual: no cambia el color
             elif status.state is ComplianceState.VIOLATION:
-                missing.append({**entry, 'severity': rule.severity})
+                # La gravedad puede ser menor que la de la regla (bata abierta = leve).
+                missing.append({**entry, 'severity': status.severity or rule.severity, 'detail': status.detail})
             elif status.state is ComplianceState.AT_RISK:
                 at_risk.append(entry)
                 progress = max(progress, status.progress)

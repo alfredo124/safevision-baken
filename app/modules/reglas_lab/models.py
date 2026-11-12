@@ -105,5 +105,7 @@ class IncidentFault(Base):
     severity = Column(String(20), nullable=False)
     capture_path = Column(String(300), nullable=True)
     present_ratio = Column(Float, nullable=True)
+    # None = el EPP falta; BATA_ABIERTA = está, pero mal puesto (falta leve).
+    detail = Column(String(40), nullable=True)
     detected_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
     created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
