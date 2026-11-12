@@ -274,7 +274,7 @@ class VideoStreamProcessor:
                 return
             if token is None:
                 # Compatibilidad: sin identificador se quita una suscripción de espectador.
-                viewer_tokens = [t for t in stream.subscriptions if not t.startswith('monitor-')]
+                viewer_tokens = [t for t in tuple(stream.subscriptions) if not t.startswith('monitor-')]
                 if not viewer_tokens:
                     return
                 token = viewer_tokens[0]
@@ -287,7 +287,7 @@ class VideoStreamProcessor:
             self._stop_stream(stream)
 
     def snapshot(self, camera_id, stream_url, live=False, timeout=3.0, **subscribe_options) -> bytes | None:
-        """Última imagen JPEG de la cámara, para miniaturas consultadas 1-2 veces por segundo.
+        """Última imagen JPEG de la cámara, para miniaturas consultadas ~6 veces por segundo.
 
         No deja una conexión abierta en el navegador: la cámara se mantiene abierta con una
         "reserva" que caduca a los SNAPSHOT_LEASE_SECONDS sin peticiones.
@@ -383,7 +383,7 @@ class VideoStreamProcessor:
                 return False
             with stream.condition:
                 stream.monitor = None
-            tokens = [t for t in stream.subscriptions if t.startswith('monitor-')]
+            tokens = [t for t in tuple(stream.subscriptions) if t.startswith('monitor-')]
         for token in tokens:
             self.unsubscribe(camera_id, token)
         return True
@@ -401,7 +401,7 @@ class VideoStreamProcessor:
             'error': stream.error,
             'analyses': monitor.analyses,
             'events': monitor.events,
-            'viewers': sum(not t.startswith('monitor-') for t in stream.subscriptions),
+            'viewers': sum(not t.startswith('monitor-') for t in tuple(stream.subscriptions)),
             'started_at': monitor.started_at,
             'reconnecting': stream.reconnecting,
             # Para la barra de sincronización del frontend.
@@ -454,7 +454,9 @@ class VideoStreamProcessor:
                     stream.latest_frame = frame
                     stream.latest_frame_ts = captured_at
                     stream.frame_sequence += 1
-                    has_viewers = any(not t.startswith('monitor-') for t in stream.subscriptions)
+                    # tuple(): copia atómica; otro hilo puede cambiar el conjunto mientras se recorre
+                    # ("Set changed size during iteration" tumbó la captura de una cámara el 2026-11-11).
+                    has_viewers = any(not t.startswith('monitor-') for t in tuple(stream.subscriptions))
                     delay = stream.sync_delay if stream.monitor else 0.0
 
                 # Solo se comprime a JPEG si alguien está mirando. El video sale limpio:

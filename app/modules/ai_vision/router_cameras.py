@@ -130,6 +130,10 @@ async def create_camera_with_video(
                     destination.write(chunk)
             if total_size == 0:
                 raise HTTPException(status_code=400, detail='El archivo de video está vacío')
+            # A 15 fps y 640 px: con el original (hasta 60 fps) leerlo ocupa la CPU que necesita el
+            # análisis y la cámara casi no se analiza (ver video_files.py).
+            from fastapi.concurrency import run_in_threadpool
+            stored_video_path = await run_in_threadpool(_optimize_upload, stored_video_path)
             camera_stream_url = str(stored_video_path.resolve()).replace('\\', '/')
         except Exception:
             stored_video_path.unlink(missing_ok=True)
@@ -153,6 +157,18 @@ async def create_camera_with_video(
             stored_video_path.unlink(missing_ok=True)
         raise
     return db_camera
+
+
+def _optimize_upload(path: Path) -> Path:
+    """Deja el video subido a 15 fps y 640 px. Si no se puede convertir, se conserva el original."""
+    from app.modules.ai_vision.video_files import needs_optimization, optimize_video
+    if not needs_optimization(path):
+        return path
+    target = path.with_name(f'{path.stem}-15fps.mp4')
+    if optimize_video(path, target):
+        path.unlink(missing_ok=True)
+        return target
+    return path
 
 
 def remove_video_file(path: Path, db: Session) -> None:

@@ -71,7 +71,7 @@ def video_feed(camera_id: int, token: str | None = Query(None), sync: bool = Que
 @router.get('/snapshot/{camera_id}')
 def video_snapshot(camera_id: int, sync: bool = Query(True), db: Session = Depends(get_db),
                    current_user=Depends(get_current_user)):
-    """Última imagen de la cámara para la cuadrícula (se consulta 1-2 veces por segundo).
+    """Última imagen de la cámara para la cuadrícula (se consulta ~6 veces por segundo).
 
     A diferencia de video_feed, no mantiene una conexión abierta por miniatura y el token
     viaja en la cabecera Authorization, no en la URL.

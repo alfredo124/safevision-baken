@@ -15,8 +15,9 @@ import cv2
 BROWSER_PREFIX = 'browser:'
 # Sin frames durante este tiempo, la cámara se considera sin señal (no se analiza).
 FRAME_TIMEOUT = 5.0
-# Ritmo máximo aceptado desde una estación; los frames más seguidos se descartan.
-MAX_INGEST_FPS = 15.0
+# Ritmo máximo aceptado desde una estación; los frames más seguidos se descartan. La estación
+# envía hasta 15/s (fluidez del video en Monitoreo); 20 deja margen al desfase de los temporizadores.
+MAX_INGEST_FPS = 20.0
 MAX_FRAME_BYTES = 2 * 1024 * 1024
 
 
