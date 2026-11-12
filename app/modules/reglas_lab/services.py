@@ -35,7 +35,7 @@ def snapshot_incident_names(db) -> int:
 
 
 def initialize_reglas_lab() -> None:
-    from app.modules.reglas_lab import models  # Register all module tables with shared metadata.
+    from app.modules.reglas_lab import models  # Registra todas las tablas del módulo en los metadatos compartidos.
 
     Base.metadata.create_all(bind=engine)
     add_missing_columns('lab_workshop_equipment_rules', {'rule_code': 'VARCHAR(40)', 'severity': 'VARCHAR(20)'})

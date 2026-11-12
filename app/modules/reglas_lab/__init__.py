@@ -1,1 +1,1 @@
-"""Laboratory safety rules and incident management."""
+"""Reglas de seguridad del laboratorio y gestión de incidencias."""

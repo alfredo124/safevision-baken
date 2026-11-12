@@ -9,6 +9,11 @@ from app.modules.reglas_lab.services import initialize_reglas_lab
 
 app = FastAPI(title="SafeVision API")
 
+# Errores en español: la web muestra el mensaje `detail` tal cual.
+from app.core import errores
+
+errores.registrar(app)
+
 # CORS: la red local (LAN) y los orígenes de SAFEVISION_CORS_ORIGINS. Ya no se acepta "*".
 from app.core.config import LAN_ORIGIN_REGEX, allow_lan_origins, cors_origins
 

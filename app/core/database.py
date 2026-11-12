@@ -33,8 +33,8 @@ def add_missing_columns(table_name: str, columns: dict[str, str]) -> None:
 
 
 def ensure_camera_schema():
-    """Add camera configuration columns to databases created by older versions."""
-    from app.modules.ai_vision import models  # Register Camera with the shared metadata.
+    """Añade las columnas de configuración de cámaras a bases creadas por versiones anteriores."""
+    from app.modules.ai_vision import models  # Registra Camera en los metadatos compartidos.
 
     Base.metadata.create_all(bind=engine)
     existing_columns = {column['name'] for column in inspect(engine).get_columns('cameras')}

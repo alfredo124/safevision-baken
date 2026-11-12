@@ -22,7 +22,7 @@ def get_db():
 def create_user(user: schemas.UserCreate, db: Session = Depends(get_db), _admin=Depends(require_admin)):
     db_user = db.query(models.User).filter(models.User.username == user.username).first()
     if db_user:
-        raise HTTPException(status_code=400, detail='Username already registered')
+        raise HTTPException(status_code=400, detail='Ese nombre de usuario ya está registrado')
     
     pwd_bytes = user.password.encode('utf-8')
     hashed_password = bcrypt.hashpw(pwd_bytes, bcrypt.gensalt()).decode('utf-8')
