@@ -29,13 +29,14 @@ def _max_fps_from_env() -> float:
 
 
 def _image_size_from_env() -> int:
-    """Tamaño de imagen para YOLO (SAFEVISION_IMGSZ, 640 por defecto). Múltiplo de 32.
-    480 es ~1.8 veces más rápido en CPU; se decide con el video de calibración (Tarea 1)."""
+    """Tamaño de imagen para YOLO (SAFEVISION_IMGSZ, 480 por defecto). Múltiplo de 32.
+    480 desde el 2026-11-12 (antes 640): con los videos etiquetados del equipo da exactamente las mismas
+    faltas y falsas alarmas que 640, y con 5 cámaras por turnos cada una se analiza cada ~3 s en vez de ~5."""
     import os
     try:
-        value = int(os.environ.get('SAFEVISION_IMGSZ', '640'))
+        value = int(os.environ.get('SAFEVISION_IMGSZ', '480'))
     except ValueError:
-        return 640
+        return 480
     return min(1280, max(320, round(value / 32) * 32))
 
 
@@ -57,6 +58,21 @@ def performance_summary() -> dict:
     from app.modules.ai_vision import performance
     return {**performance.profile(), 'max_fps': max_processing_fps(),
             'manual': bool(os.environ.get('SAFEVISION_MAX_FPS')), 'imgsz': _image_size_from_env()}
+
+def _analysis_slots_from_env() -> int:
+    """Análisis simultáneos al arrancar, hasta que se mide el equipo al iniciar la primera práctica
+    (performance.plan_analysis decide entonces, salvo que SAFEVISION_ANALISIS_SIMULTANEOS esté definida)."""
+    import os
+    try:
+        return max(1, int(os.environ.get('SAFEVISION_ANALISIS_SIMULTANEOS', '1')))
+    except ValueError:
+        return 1
+
+
+def analysis_confidence(config: ComplianceConfig) -> float:
+    """Umbral del detector de EPP durante el monitoreo: el mínimo que el motor acepta."""
+    return config.min_equipment_confidence
+
 
 # Sincronización video/recuadros durante la práctica: el video se retrasa lo mismo
 # que tarda el análisis, para que cada recuadro coincida con el frame analizado.
@@ -84,6 +100,8 @@ class MonitorState:
     analyses: int = 0
     events: int = 0
     last_result: object | None = None
+    last_analysis_at: float | None = None
+    gaps: deque = field(default_factory=lambda: deque(maxlen=30))  # segundos entre análisis
 
 
 @dataclass
@@ -159,6 +177,8 @@ class VideoStreamProcessor:
         self.jpeg_quality = jpeg_quality
         self.confidence_floor = confidence_floor
         self.streams: dict[int, CameraStream] = {}
+        from app.modules.ai_vision.turnos import AnalysisTurns
+        self.turns = AnalysisTurns(slots=_analysis_slots_from_env())  # turnos de análisis entre cámaras (turnos.py)
         self.lock = threading.RLock()
         self.inference_lock = threading.Lock()
         self._capture_factory = capture_factory or _open_capture
@@ -183,8 +203,13 @@ class VideoStreamProcessor:
             return self._pipeline_factory()
         from app.modules.ai_vision import performance
         from app.modules.ai_vision.detectors import DetectorPipeline, PersonTracker
-        pipeline = DetectorPipeline(self.equipment_detector, PersonTracker(self.pose_model_path), self.image_size)
+        new = lambda: DetectorPipeline(self.equipment_detector, PersonTracker(self.pose_model_path), self.image_size)
+        pipeline = new()
         performance.measure(pipeline)  # solo la primera vez: ajusta el límite a este equipo
+        # Solo la primera vez: cuántas cámaras analizan a la vez en este equipo (regla + medición).
+        plan = performance.plan_analysis(new, prepare=self.equipment_detector.ensure_copies)
+        self.equipment_detector.ensure_copies(plan['analysis_slots'])
+        self.turns.set_slots(plan['analysis_slots'])
         return pipeline
 
     def predict_options(self, confidence_threshold):
@@ -215,9 +240,10 @@ class VideoStreamProcessor:
 
     # ------------------------------------------------------------ suscripciones
     def subscribe(self, camera_id, stream_url, draw_boxes=True, confidence_threshold=0.5, processing_fps=10,
-                  monitor=False) -> str:
-        """Registra un espectador (o el monitoreo, con monitor=True) y devuelve su identificador."""
-        token = f'monitor-{uuid4().hex}' if monitor else uuid4().hex
+                  monitor=False, focus=False) -> str:
+        """Registra un espectador (o el monitoreo, con monitor=True) y devuelve su identificador.
+        focus=True: la cámara se ve en grande (video continuo) y tiene prioridad en los turnos de análisis."""
+        token = f'monitor-{uuid4().hex}' if monitor else f'focus-{uuid4().hex}' if focus else uuid4().hex
         with self.lock:
             stream = self.streams.get(camera_id)
             if stream and stream.stream_url == stream_url and not stream.stop_event.is_set():
@@ -384,6 +410,7 @@ class VideoStreamProcessor:
             with stream.condition:
                 stream.monitor = None
             tokens = [t for t in tuple(stream.subscriptions) if t.startswith('monitor-')]
+        self.turns.forget(camera_id)
         for token in tokens:
             self.unsubscribe(camera_id, token)
         return True
@@ -407,6 +434,10 @@ class VideoStreamProcessor:
             # Para la barra de sincronización del frontend.
             'sync_delay': round(stream.sync_delay, 2),
             'analysis_rate': round(monitor.analyses / max(1.0, time.time() - monitor.started_at), 2),
+            # Cada cuánto se analiza esta cámara (últimos 30 análisis), para ver el efecto de los turnos.
+            'gap_median': round(sorted(monitor.gaps)[len(monitor.gaps) // 2], 2) if monitor.gaps else None,
+            'gap_max': round(max(monitor.gaps), 2) if monitor.gaps else None,
+            'focused': any(t.startswith('focus-') for t in tuple(stream.subscriptions)),
         }
 
     # ----------------------------------------------------------------- frames
@@ -545,15 +576,23 @@ class VideoStreamProcessor:
                     return
                 if not ready or stream.latest_frame is None:
                     continue
-                # Siempre el último frame: si el análisis va atrasado se descartan los intermedios.
-                frame = stream.latest_frame.copy()
-                frame_ts = stream.latest_frame_ts
-                last_frame_sequence = stream.frame_sequence
-                monitor = stream.monitor
-            if monitor is None:
+                focused = any(t.startswith('focus-') for t in tuple(stream.subscriptions))
+            # Turno de análisis compartido entre cámaras (turnos.py): se espera fuera del lock de la cámara.
+            if not self.turns.acquire(stream.camera_id, focused, stream.stop_event):
                 continue
-
             try:
+                with stream.condition:
+                    # Siempre el último frame, tomado al recibir el turno: los intermedios se descartan.
+                    frame = stream.latest_frame.copy() if stream.latest_frame is not None else None
+                    frame_ts = stream.latest_frame_ts
+                    last_frame_sequence = stream.frame_sequence
+                    monitor = stream.monitor
+                if monitor is None or frame is None:
+                    continue
+                now = time.monotonic()
+                if monitor.last_analysis_at is not None:
+                    monitor.gaps.append(now - monitor.last_analysis_at)
+                monitor.last_analysis_at = now
                 overlay = self._analyze_for_monitoring(stream, monitor, frame, frame_ts)
                 latency = time.monotonic() - frame_ts
                 with stream.condition:
@@ -573,13 +612,17 @@ class VideoStreamProcessor:
                     stream.stop_event.set()
                     stream.condition.notify_all()
                 return
+            finally:
+                self.turns.release(stream.camera_id)
 
     def _analyze_for_monitoring(self, stream: CameraStream, monitor: MonitorState, frame,
                                 frame_ts: float | None = None) -> dict:
         frame_ts = frame_ts if frame_ts is not None else time.monotonic()
-        observation = monitor.pipeline.analyze(
-            frame, frame_ts, self.effective_confidence(stream.confidence_threshold),
-        )
+        # El EPP se detecta con el umbral con que se calibró el motor (min_equipment_confidence, 0.25),
+        # no con el de la cámara (0.5 por defecto, pensado para los recuadros de la vista). Con 0.5 se
+        # perdían el 20-35 % de las detecciones de EPP y el motor las contaba como "no lo lleva"
+        # (medido el 2026-11-12 con los videos etiquetados del equipo).
+        observation = monitor.pipeline.analyze(frame, frame_ts, analysis_confidence(monitor.engine.config))
         result = monitor.engine.update(observation)
         monitor.analyses += 1
         monitor.last_result = result

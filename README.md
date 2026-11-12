@@ -110,16 +110,28 @@ Las variables están documentadas en `.env.example` y se activan quitando `rem` 
 - `SAFEVISION_MAX_FPS`: análisis por segundo y cámara. **Sin definir, es automático**: al iniciar la primera
   práctica se cronometra el análisis en ese PC (2 en un PC lento, 3-4 con una CPU potente, 5 con GPU). El equipo
   detectado y el límite se ven en el control de práctica. Pon un número solo para fijarlo a mano.
-- `SAFEVISION_IMGSZ`: tamaño de imagen para YOLO (640 por defecto). Con `480` analiza ~1,8 veces más rápido
-  en CPU; en la prueba con videos detectó 52 EPP frente a 55 con 640 (75 imágenes). Se decide con el video de calibración.
+- `SAFEVISION_IMGSZ`: tamaño de imagen para YOLO (480 por defecto desde el 2026-11-12; antes 640). Con los
+  videos etiquetados del equipo, 480 y 640 dan exactamente las mismas faltas y falsas alarmas, y 480 es más rápido.
+- `SAFEVISION_ANALISIS_SIMULTANEOS`: cámaras que analizan a la vez. **Sin definir, es automático** (ver
+  abajo). Pon un número solo para fijarlo a mano.
 - `SAFEVISION_ESCALAR_MIN`: minutos sin respuesta antes de avisar al administrador (5 por defecto).
-- `SAFEVISION_MODO_PRUEBA=0`: versión final, no permite borrar incidencias.
 
 ### Rendimiento: por qué una cámara va lenta
-El PC reparte su CPU entre **todas las cámaras del taller en práctica**. Medido con YOLO real en un PC de
-2 núcleos sin GPU: 1 cámara ≈ 1,8 análisis por segundo; 4 cámaras ≈ 0,6 cada una. Para que los recuadros
-se actualicen más rápido: asigna al taller solo las cámaras que se usan, prueba `SAFEVISION_IMGSZ=480` o usa
-un PC más potente o con GPU. La vista previa del celular siempre va fluida: no pasa por el servidor.
+El video de todas las cámaras va siempre fluido; lo que se reparte es el **análisis** (recuadros y alertas).
+Las cámaras de la práctica se **turnan** (`app/modules/ai_vision/turnos.py`): solo unas pocas analizan a la
+vez. Primero va cualquier cámara que lleve 4 s sin analizarse; después, la cámara ampliada en Monitoreo
+(como máximo 1 de cada 3 turnos); si no, la que más espera.
+
+**Cuántas analizan a la vez se decide solo en cada PC** (`performance.plan_analysis`), al iniciar la primera
+práctica tras arrancar el backend (unos segundos más esa vez): se cuentan los núcleos físicos, se miden 1, 2
+y hasta núcleos ÷ 4 análisis a la vez (con GPU, hasta 2), y se usa lo que más rinda. Hay una copia del
+modelo de EPP por análisis simultáneo. La decisión se ve en el control de práctica y en
+`GET /modules/ai_vision/rendimiento`. Medido el 2026-11-12 con 5 videos en un PC de 2 núcleos sin GPU:
+todas a la vez, 0.20 análisis/s por cámara (y 0.04-0.08 al ampliar una); de 1 en 1, 0.36/s con pausas de
+hasta 11 s; con 2 a la vez (lo que eligió solo), ~0.55/s por cámara, ninguna espera más de ~2.5 s y la
+ampliada se analiza cada ~1.3 s.
+El motor confirma una falta con 8 s de muestras dentro de una ventana de 12 s, así que funciona igual con
+una muestra cada 0.5 s o cada 4.5 s. Para más cámaras: asigna al taller solo las que se usan o usa una GPU.
 
 ### PC con GPU NVIDIA (opcional, mucho más rápido)
 `requirements.txt` instala PyTorch para CPU. Con una GPU NVIDIA y el `.venv` activado:
@@ -240,6 +252,31 @@ python tools/aplicar_reglamento.py quimica-v3.1 --taller 2 --confirmar
 - Si una alerta sigue pendiente más de `SAFEVISION_ESCALAR_MIN` minutos (por defecto 5), se marca para el administrador; nunca se confirma sola.
 - Las cámaras en vivo (webcam, RTSP) se reconectan solas hasta 2 minutos; durante el corte no se analiza ni se generan alertas.
 - `SAFEVISION_CAPTURE_DIR` cambia la carpeta de capturas. **Al probar con una copia de la base, usa siempre otra carpeta**: borrar o descartar en la copia borraría las capturas reales.
-- **Fase de prueba:** al iniciar, el administrador puede marcar "Borrar incidencias anteriores de este taller" (`clear_previous`), que elimina sus incidencias, faltas y capturas. Para la versión final, desactivarlo con la variable de entorno `SAFEVISION_MODO_PRUEBA=0`.
+- Las incidencias, faltas y capturas se conservan siempre: iniciar o detener una práctica no borra nada (la antigua fase de prueba con `clear_previous` se eliminó el 2026-11-12). Solo al **descartar** una alerta se borran sus imágenes.
+
+### Cómo decide el motor (revisión del 2026-11-12)
+- **Umbral del detector:** durante la práctica el EPP se detecta con 0.25, el umbral con que se calibró el
+  motor. El umbral de cada cámara (0.5 por defecto) solo afecta a los recuadros de la vista. Antes se usaba
+  el de la cámara y se perdían el 20-35 % de las detecciones de EPP, que el motor contaba como "no lo lleva".
+- **Bata por color:** el detector mide qué parte del torso es blanca o gris clara (`torso_light`). Torso
+  oscuro (< 0.3): la "bata" detectada es otra prenda y no cuenta. Torso cubierto y claro (≥ 0.8): bata puesta,
+  sin mirar la confianza del modelo. Entre ambos: bata abierta (falta leve). Si el modelo no ve la bata pero
+  el torso es claro, esa imagen no cuenta como prueba de que falte. Medido: sin bata 0.00-0.04, bata abierta
+  0.48-0.85, cerrada 0.86-1.00. Una camisa blanca sin bata puede pasar por bata.
+- **Personas parciales:** con pose, una persona solo se evalúa si se ve al menos un hombro (los primeros
+  planos de manos o de cara se ignoran).
+- **Lentes:** `best.pt` casi no detecta lentes puestos (4 de 78 imágenes en los videos del equipo); sus
+  alertas tienen muchas falsas alarmas hasta reentrenar el modelo.
+- Para calibrar: `tools/record_detections.py` (graba detecciones, ya con el color del torso),
+  `tools/agregar_color_torso.py` (añade el color a grabaciones anteriores) y `tools/evaluate_labels.py`
+  (compara con tramos etiquetados en `grabaciones/*.labels.json`).
+
+### Reporte SST
+- `GET /modules/reglas_lab/report?start=...&end=...` (opcional `campus_id`, `workshop_id`): resumen del periodo `[start, end)`
+  calculado con las incidencias guardadas (alertas, confirmadas, falsas alarmas, pendientes, faltas por gravedad y por EPP,
+  tiempo medio de respuesta), resultados por laboratorio y bitácora (hasta 300 filas). Las fechas llevan zona horaria: la
+  web envía el inicio y el fin del día en su hora local. El encargado solo obtiene su laboratorio.
+- Incluye una huella SHA-256 del contenido (sin la hora de emisión): si una alerta del periodo cambia, la huella cambia.
+  La lógica está en `app/modules/reglas_lab/reporte.py`.
 
 Las incidencias admiten clase/confianza YOLO y `bounding_box` (`[x1, y1, x2, y2]`) con dimensiones del frame. Estos campos quedan persistidos para que la interfaz pueda recuperar los datos al dibujar cajas propias. Las cámaras con incidencias históricas no se pueden eliminar.

@@ -54,6 +54,18 @@ class PoseRules(unittest.TestCase):
         for equipment_id in ('guantes', 'lentes', 'chaleco'):
             self.assertEqual(state_of(result, 1, equipment_id), ComplianceState.COMPLIANT)
 
+    def test_hands_or_face_without_shoulders_are_not_evaluated(self):
+        """Primer plano de unas manos: el pose ve muñecas (y a veces inventa una cara), pero ningún
+        hombro. Generaba faltas de guantes y lentes falsas (capturas del 2026-11-12)."""
+        engine = ComplianceEngine([GLOVES, GOGGLES])
+        events, result = run(engine, 60, posed(torso=HIDDEN))
+        self.assertEqual(events, [])
+        self.assertEqual(state_of(result, 1, 'guantes'), ComplianceState.NOT_VERIFIABLE)
+        self.assertEqual(state_of(result, 1, 'lentes'), ComplianceState.NOT_VERIFIABLE)
+        # Con la comprobación desactivada, las mismas muestras sí alertan (es esta regla la que lo evita).
+        loose = ComplianceEngine([GLOVES], ComplianceConfig(require_shoulder=False))
+        self.assertTrue(run(loose, 60, posed(torso=HIDDEN))[0])
+
     def test_hidden_hands_never_create_glove_incident(self):
         engine = ComplianceEngine([GLOVES])
         events, result = run(engine, 60, posed(wrists=(HIDDEN, HIDDEN)))

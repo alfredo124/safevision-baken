@@ -6,12 +6,12 @@ if exist .venv\Scripts\activate.bat call .venv\Scripts\activate.bat
 rem --- Configuración opcional (quita "rem" para usarla) ---
 rem Análisis por segundo y cámara. Sin definir es automático (se mide el PC); un número lo fija:
 rem set SAFEVISION_MAX_FPS=4
-rem Tamaño de imagen para YOLO (640 por defecto; 480 analiza ~1.8 veces más rápido en CPU):
-rem set SAFEVISION_IMGSZ=480
+rem Tamaño de imagen para YOLO (480 por defecto; 640 para volver al anterior):
+rem set SAFEVISION_IMGSZ=640
+rem Cámaras que analizan a la vez (sin definir: se mide y se elige solo en cada PC):
+rem set SAFEVISION_ANALISIS_SIMULTANEOS=2
 rem Minutos sin respuesta antes de avisar al administrador:
 rem set SAFEVISION_ESCALAR_MIN=5
-rem Versión final: desactiva el borrado de incidencias de prueba:
-rem set SAFEVISION_MODO_PRUEBA=0
 rem Orígenes extra permitidos (por ejemplo Vercel o un túnel):
 rem set SAFEVISION_CORS_ORIGINS=https://mi-app.vercel.app
 

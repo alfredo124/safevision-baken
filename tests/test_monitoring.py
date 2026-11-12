@@ -93,6 +93,23 @@ class SubscriptionTest(unittest.TestCase):
         self.assertTrue(processor.stop_monitoring(1))
         self.assertNotIn(1, processor.streams)
 
+    def test_monitoring_uses_engine_threshold_not_camera_threshold(self):
+        """Con el umbral de la cámara (0.5) se perdían EPP detectados entre 0.25 y 0.5 (2026-11-12)."""
+        seen = []
+
+        class RecordingPipeline(FakePipeline):
+            def analyze(self, frame, timestamp, equipment_conf):
+                seen.append(equipment_conf)
+                return super().analyze(frame, timestamp, equipment_conf)
+
+        processor = VideoStreamProcessor(capture_factory=lambda url: (FakeCapture(), False),
+                                         pipeline_factory=RecordingPipeline)
+        processor.start_monitoring(1, 'cam1', [models_rule('guantes', 'manos', 'gloves')], lambda *a: None,
+                                   confidence_threshold=0.5, config=FAST)
+        self.assertTrue(wait_until(lambda: seen))
+        processor.stop_monitoring(1)
+        self.assertEqual(set(seen), {FAST.min_equipment_confidence})
+
     def test_stale_unsubscribe_does_not_cut_new_stream(self):
         processor = make_processor()
         old = processor.subscribe(1, 'cam1')

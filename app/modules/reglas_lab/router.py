@@ -133,9 +133,20 @@ def _faults_by_incident(db: Session, incidents: list) -> dict[int, list[dict]]:
     return result
 
 
+def _session_codes(db: Session, incidents: list) -> dict[int, str]:
+    ids = {incident.session_id for incident in incidents if incident.session_id}
+    if not ids:
+        return {}
+    return dict(db.query(models.PracticeSession.id, models.PracticeSession.code)
+                .filter(models.PracticeSession.id.in_(ids)).all())
+
+
 def _incident_response(incident, workshop_name: str, camera_name: str, equipment_name: str | None,
-                       reviewer_name: str | None = None, faults: list[dict] | None = None) -> dict:
+                       reviewer_name: str | None = None, faults: list[dict] | None = None,
+                       session_code: str | None = None) -> dict:
     return {
+        'session_id': incident.session_id,
+        'session_code': session_code,
         'id': incident.id,
         'code': incident.code,
         'workshop_id': incident.workshop_id,
@@ -330,6 +341,8 @@ def create_equipment(
 def list_incidents(
     workshop_id: int | None = None,
     camera_id: int | None = None,
+    session_id: int | None = None,
+    active_session: bool = False,
     date_from: date | None = None,
     date_to: date | None = None,
     incident_status: schemas.IncidentStatus | None = Query(None, alias='status'),
@@ -350,6 +363,13 @@ def list_incidents(
         query = query.filter(models.Incident.workshop_id == workshop_id)
     if camera_id is not None:
         query = query.filter(models.Incident.camera_id == camera_id)
+    if session_id is not None:
+        query = query.filter(models.Incident.session_id == session_id)
+    if active_session:
+        # Panel de alertas: solo las de prácticas en curso. Las de prácticas terminadas siguen en el
+        # historial con su sesión, pero ya no son alertas que atender en la sala.
+        open_sessions = db.query(models.PracticeSession.id).filter(models.PracticeSession.ended_at.is_(None))
+        query = query.filter(models.Incident.session_id.in_(open_sessions))
     if date_from:
         query = query.filter(models.Incident.occurred_at >= datetime.combine(date_from, time.min, timezone.utc))
     if date_to:
@@ -359,10 +379,60 @@ def list_incidents(
 
     rows = query.order_by(models.Incident.occurred_at.desc()).limit(500).all()
     faults = _faults_by_incident(db, [row[0] for row in rows])
+    codes = _session_codes(db, [row[0] for row in rows])
     return [
-        _incident_response(incident, workshop_name, camera_name, equipment_name, reviewer_name, faults[incident.id])
+        _incident_response(incident, workshop_name, camera_name, equipment_name, reviewer_name, faults[incident.id],
+                           codes.get(incident.session_id))
         for incident, workshop_name, camera_name, equipment_name, reviewer_name in rows
     ]
+
+
+@router.get('/report')
+def incident_report(
+    start: datetime,
+    end: datetime,
+    workshop_id: int | None = None,
+    campus_id: int | None = None,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Reporte SST del periodo [start, end) con las incidencias reales. La web envía el inicio y el fin
+    del día en su hora local (con zona). El encargado solo obtiene su laboratorio."""
+    from app.modules.reglas_lab.reporte import build_report
+
+    if start.tzinfo is None or end.tzinfo is None:
+        raise HTTPException(status_code=422, detail='Las fechas deben incluir la zona horaria')
+    if end <= start:
+        raise HTTPException(status_code=422, detail='La fecha final debe ser posterior a la inicial')
+    if (end - start).days > 366:
+        raise HTTPException(status_code=422, detail='El periodo del reporte no puede pasar de un año')
+
+    allowed = allowed_workshop_ids(current_user)
+    scope = None if allowed is None else set(allowed)
+    campus = None
+    if campus_id is not None:
+        campus = db.get(models.Campus, campus_id)
+        if campus is None:
+            raise HTTPException(status_code=404, detail='Local no encontrado')
+        in_campus = {row.id for row in db.query(models.Workshop.id).filter(models.Workshop.campus_id == campus_id)}
+        scope = in_campus if scope is None else scope & in_campus
+    workshop = None
+    if workshop_id is not None:
+        workshop = db.get(models.Workshop, workshop_id)
+        if workshop is None:
+            raise HTTPException(status_code=404, detail='Taller no encontrado')
+        _ensure_workshop_access(workshop, current_user)
+        scope = {workshop_id} if scope is None else scope & {workshop_id}
+
+    report = build_report(db, start, end, scope)
+    report['filters'] = {
+        'workshop_id': workshop_id,
+        'workshop_name': workshop.name if workshop else None,
+        'campus_id': campus_id,
+        'campus_name': campus.name if campus else None,
+    }
+    report['generated_by'] = current_user.full_name or current_user.username
+    return report
 
 
 @router.post('/incidents', response_model=schemas.IncidentResponse, status_code=status.HTTP_201_CREATED)
@@ -384,6 +454,7 @@ def create_incident(
     if payload.equipment_id and not db.query(models.SafetyEquipment).filter_by(id=payload.equipment_id, is_active=True).first():
         raise HTTPException(status_code=400, detail='Equipo de seguridad desconocido')
 
+    from app.modules.reglas_lab.sesiones import open_session_for
     incident = models.Incident(
         code=f'INC-{datetime.now(timezone.utc):%Y%m%d}-{uuid4().hex[:8].upper()}',
         workshop_id=workshop.id,
@@ -402,6 +473,7 @@ def create_incident(
         frame_height=payload.frame_height,
         occurred_at=payload.occurred_at or datetime.now(timezone.utc),
         created_by=current_user.id,
+        session_id=getattr(open_session_for(db, workshop.id), 'id', None),  # práctica en curso, si hay
     )
     db.add(incident)
     db.commit()
@@ -426,6 +498,8 @@ def create_incident(
         'frame_width': incident.frame_width,
         'frame_height': incident.frame_height,
         'occurred_at': _as_utc(incident.occurred_at),
+        'session_id': incident.session_id,
+        'session_code': _session_codes(db, [incident]).get(incident.session_id),
     }
 
 
@@ -456,7 +530,8 @@ def _single_incident_response(db: Session, incident, workshop) -> dict:
     equipment_name = db.query(models.SafetyEquipment.name).filter_by(id=incident.equipment_id).scalar()
     reviewer_name = db.query(User.full_name).filter_by(id=incident.reviewed_by).scalar() if incident.reviewed_by else None
     faults = _faults_by_incident(db, [incident])[incident.id]
-    return _incident_response(incident, workshop.name, camera_name, equipment_name, reviewer_name, faults)
+    return _incident_response(incident, workshop.name, camera_name, equipment_name, reviewer_name, faults,
+                              _session_codes(db, [incident]).get(incident.session_id))
 
 
 @router.post('/incidents/{incident_id}/review', response_model=schemas.IncidentResponse)
@@ -506,40 +581,26 @@ def _workshop_for_monitoring(db: Session, workshop_id: int, current_user) -> mod
     return workshop
 
 
-@router.get('/test-mode')
-def get_test_mode(current_user=Depends(get_current_user)):
-    from app.modules.reglas_lab.incident_service import test_mode_enabled
-    return {'enabled': test_mode_enabled(), 'can_clear': test_mode_enabled() and _role(current_user) == 'ADMINISTRADOR'}
-
-
 @router.post('/workshops/{workshop_id}/monitoring/start')
-def start_monitoring(workshop_id: int, payload: schemas.MonitoringStart | None = None,
-                     db: Session = Depends(get_db), current_user=Depends(get_current_user)):
+def start_monitoring(workshop_id: int, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
     """Inicia la práctica: analiza todas las cámaras del taller aunque nadie mire el video.
-
-    Con clear_previous (fase de prueba, solo administrador) borra antes las incidencias,
-    faltas y capturas de ese taller y reinicia el motor.
-    """
-    from app.modules.reglas_lab import monitoring
-    from app.modules.reglas_lab.incident_service import clear_workshop_incidents, test_mode_enabled
-    _workshop_for_monitoring(db, workshop_id, current_user)
-    cleared = 0
-    if payload and payload.clear_previous:
-        if not test_mode_enabled():
-            raise HTTPException(status_code=403, detail='El borrado de incidencias está desactivado (modo prueba apagado)')
-        if _role(current_user) != 'ADMINISTRADOR':
-            raise HTTPException(status_code=403, detail='Solo el administrador puede borrar incidencias de prueba')
-        monitoring.stop_workshop(db, workshop_id)  # el motor también empieza de cero
-        cleared = clear_workshop_incidents(db, workshop_id)
-    return {'workshop_id': workshop_id, 'cleared_incidents': cleared,
-            'cameras': monitoring.start_workshop(db, workshop_id)}
+    Las incidencias anteriores se conservan siempre: lo ocurrido en el laboratorio no se borra."""
+    from app.modules.reglas_lab import monitoring, sesiones
+    workshop = _workshop_for_monitoring(db, workshop_id, current_user)
+    session = sesiones.start_session(db, workshop, current_user.id)  # antes del análisis: las alertas ya la usan
+    cameras = monitoring.start_workshop(db, workshop_id)
+    return {'workshop_id': workshop_id, 'cameras': cameras,
+            'session': _session_payload(db, session)}
 
 
 @router.post('/workshops/{workshop_id}/monitoring/stop')
 def stop_monitoring(workshop_id: int, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
-    from app.modules.reglas_lab import monitoring
+    from app.modules.reglas_lab import monitoring, sesiones
     _workshop_for_monitoring(db, workshop_id, current_user)
-    return {'workshop_id': workshop_id, 'cameras': monitoring.stop_workshop(db, workshop_id)}
+    cameras = monitoring.stop_workshop(db, workshop_id)
+    session = sesiones.end_session(db, workshop_id, current_user.id)
+    return {'workshop_id': workshop_id, 'cameras': cameras,
+            'session': _session_payload(db, session) if session else None}
 
 
 @router.get('/workshops/{workshop_id}/monitoring')
@@ -549,8 +610,46 @@ def monitoring_status(workshop_id: int, db: Session = Depends(get_db), current_u
     if not workshop:
         raise HTTPException(status_code=404, detail='Taller no encontrado')
     _ensure_workshop_access(workshop, current_user)
+    from app.modules.reglas_lab.sesiones import open_session_for
+    session = open_session_for(db, workshop_id)
     return {'workshop_id': workshop_id, 'active': monitoring.is_active(workshop_id),
-            'cameras': monitoring.workshop_status(db, workshop_id)}
+            'cameras': monitoring.workshop_status(db, workshop_id),
+            'session': _session_payload(db, session) if session else None}
+
+
+def _session_payload(db: Session, session: models.PracticeSession) -> dict:
+    from app.modules.reglas_lab import sesiones
+    stats = sesiones.session_stats(db, [session.id])[session.id]
+    return sesiones.session_response(session, stats, sesiones.user_names(db, [session]))
+
+
+@router.get('/sessions')
+def list_sessions(
+    workshop_id: int | None = None,
+    start: datetime | None = None,
+    end: datetime | None = None,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Prácticas registradas (las más recientes primero), con sus alertas por estado.
+    Con start/end: las que se solapan con ese periodo. El encargado ve solo su laboratorio."""
+    from app.modules.reglas_lab import sesiones
+    query = db.query(models.PracticeSession)
+    allowed = allowed_workshop_ids(current_user)
+    if allowed is not None:
+        query = query.filter(models.PracticeSession.workshop_id.in_(allowed or {-1}))
+    if workshop_id is not None:
+        query = query.filter(models.PracticeSession.workshop_id == workshop_id)
+    if start is not None:
+        start_utc = start.astimezone(timezone.utc).replace(tzinfo=None) if start.tzinfo else start
+        query = query.filter((models.PracticeSession.ended_at.is_(None)) | (models.PracticeSession.ended_at > start_utc))
+    if end is not None:
+        end_utc = end.astimezone(timezone.utc).replace(tzinfo=None) if end.tzinfo else end
+        query = query.filter(models.PracticeSession.started_at < end_utc)
+    rows = query.order_by(models.PracticeSession.started_at.desc()).limit(500).all()
+    stats = sesiones.session_stats(db, [row.id for row in rows])
+    names = sesiones.user_names(db, rows)
+    return [sesiones.session_response(row, stats[row.id], names) for row in rows]
 
 
 def _serve_capture(db: Session, incident_id: int, current_user, fault_id: int | None = None):

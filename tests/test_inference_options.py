@@ -28,13 +28,14 @@ class PredictOptionsTest(unittest.TestCase):
         for value in (None, 0, -1, 1.5):
             self.assertEqual(_processor_without_model().predict_options(value)['conf'], 0.25)
 
-    def test_default_image_size_matches_training(self):
+    def test_default_image_size_is_480(self):
+        """480 desde el 2026-11-12 (antes 640, el del entrenamiento): con los videos etiquetados da las mismas
+        faltas y falsas alarmas que 640 y permite analizar varias cámaras por turnos cada ~3 s."""
         import os
         from app.modules.ai_vision.services import _image_size_from_env
         with mock.patch.dict(os.environ):
             os.environ.pop('SAFEVISION_IMGSZ', None)
-            self.assertEqual(_image_size_from_env(), 640, 'Sin configurar, el mismo tamaño del entrenamiento')
-        self.assertEqual(_processor_without_model().predict_options(0.5)['imgsz'], 640)
+            self.assertEqual(_image_size_from_env(), 480)  # el procesador real: test_multicliente
 
 
 @unittest.skipUnless((ROOT / 'best.pt').exists() and (ROOT / 'videos' / 'videoplayback.mp4').exists(),

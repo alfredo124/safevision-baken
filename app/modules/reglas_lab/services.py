@@ -47,9 +47,13 @@ def initialize_reglas_lab() -> None:
         'reviewed_by': 'INTEGER', 'reviewed_at': 'DATETIME', 'review_reason': 'VARCHAR(300)',
         'action_taken': 'VARCHAR(30)', 'track_id': 'INTEGER',
         'camera_name': 'VARCHAR(120)', 'workshop_name': 'VARCHAR(120)', 'laboratory_type': 'VARCHAR(20)',
+        'session_id': 'INTEGER',
     })
     with SessionLocal() as db:
         snapshot_incident_names(db)
+        # El análisis vive en memoria: una práctica que seguía abierta al apagar el servidor ya no corre.
+        from app.modules.reglas_lab.sesiones import close_interrupted_sessions
+        close_interrupted_sessions(db)
         # Solo se añaden los equipos que faltan; los existentes no se modifican.
         existing = {row.id for row in db.query(SafetyEquipment.id).all()}
         missing = [equipment for equipment in DEFAULT_EQUIPMENT if equipment['id'] not in existing]

@@ -182,7 +182,5 @@ class IncidentResponse(BaseModel):
     faults: list[IncidentFaultResponse] = Field(default_factory=list)
     pending_seconds: int | None = None  # solo para alertas pendientes
     escalated: bool = False  # pendiente más tiempo del permitido: se avisa al administrador
-
-class MonitoringStart(BaseModel):
-    # Fase de prueba: borrar antes las incidencias del taller (solo administrador).
-    clear_previous: bool = False
+    session_id: int | None = None  # práctica en la que ocurrió (None: anterior a las sesiones)
+    session_code: str | None = None

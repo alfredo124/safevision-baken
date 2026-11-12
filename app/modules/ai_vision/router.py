@@ -56,6 +56,7 @@ def video_feed(camera_id: int, token: str | None = Query(None), sync: bool = Que
             draw_boxes=camera.overlay_enabled,
             confidence_threshold=camera.confidence_threshold,
             processing_fps=camera.processing_fps,
+            focus=True,  # video continuo = cámara ampliada en Monitoreo: prioridad en los turnos de análisis
         )
     except RuntimeError as error:
         raise HTTPException(status_code=503, detail=str(error)) from error

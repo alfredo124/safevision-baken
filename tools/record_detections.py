@@ -14,8 +14,15 @@ import json
 import time
 from pathlib import Path
 
+import sys
+
 import cv2
 from ultralytics import YOLO
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from app.modules.ai_vision.detectors import torso_light  # noqa: E402
+from app.modules.reglas_lab.compliance import PersonDetection  # noqa: E402
 
 
 def main() -> None:
@@ -77,6 +84,12 @@ def main() -> None:
                     'track_id': int(box.id[0]) if box.id is not None else None,
                     'keypoints': [[round(v, 2) for v in point] for point in keypoints[row]] if keypoints else None,
                 })
+            # Color del torso (bata blanca u otra prenda), igual que en el monitoreo.
+            for person in persons:
+                if person['keypoints']:
+                    detection = PersonDetection(0, tuple(person['box']), person['conf'],
+                                                keypoints=tuple(tuple(point) for point in person['keypoints']))
+                    person['torso_light'] = torso_light(frame, detection)
             equipment = []
             for box in items.boxes:
                 name = equipment_model.names[int(box.cls[0])]

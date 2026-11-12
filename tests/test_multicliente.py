@@ -157,10 +157,10 @@ class PortabilityTest(unittest.TestCase):
         import os
         with mock.patch.dict(os.environ, {}, clear=False):
             os.environ.pop('SAFEVISION_IMGSZ', None)
-            self.assertEqual(services._image_size_from_env(), 640, 'Por defecto no cambia')
-            self.assertEqual(services.VideoStreamProcessor().image_size, 640)
-        for value, expected in (('480', 480), ('500', 512), ('abc', 640), ('64', 320)):
+            self.assertEqual(services._image_size_from_env(), 480, 'Por defecto 480 (2026-11-12)')
+            self.assertEqual(services.VideoStreamProcessor().image_size, 480)
+        for value, expected in (('640', 640), ('500', 512), ('abc', 480), ('64', 320)):
             with mock.patch.dict(os.environ, {'SAFEVISION_IMGSZ': value}):
                 self.assertEqual(services._image_size_from_env(), expected, value)
-        with mock.patch.dict(os.environ, {'SAFEVISION_IMGSZ': '480'}):
-            self.assertEqual(services.VideoStreamProcessor().image_size, 480)
+        with mock.patch.dict(os.environ, {'SAFEVISION_IMGSZ': '640'}):
+            self.assertEqual(services.VideoStreamProcessor().image_size, 640)

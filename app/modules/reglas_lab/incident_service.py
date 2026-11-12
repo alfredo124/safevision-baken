@@ -114,12 +114,13 @@ def _refresh_summary(db: Session, incident: models.Incident) -> None:
 
 
 def _open_alert_for(db: Session, camera_id: int, event: ViolationEvent, now: datetime,
-                    group_seconds: float) -> models.Incident | None:
-    """Alerta pendiente de la misma persona con actividad reciente, si existe."""
+                    group_seconds: float, session_id: int | None) -> models.Incident | None:
+    """Alerta pendiente de la misma persona con actividad reciente, en la misma práctica, si existe."""
     candidates = (
         db.query(models.Incident)
         .filter(models.Incident.camera_id == camera_id, models.Incident.status == 'PENDIENTE',
-                models.Incident.created_by.is_(None))
+                models.Incident.created_by.is_(None), models.Incident.session_id.is_(session_id)
+                if session_id is None else models.Incident.session_id == session_id)
         .order_by(models.Incident.id.desc()).limit(20).all()
     )
     for incident in candidates:
@@ -149,7 +150,10 @@ def record_system_fault(
     """
     now = datetime.now(timezone.utc)
     window = GROUP_SECONDS if group_seconds is None else group_seconds
-    incident = _open_alert_for(db, camera_id, event, now, window)
+    from app.modules.reglas_lab.sesiones import open_session_for
+    session = open_session_for(db, workshop_id)  # práctica en curso del laboratorio
+    session_id = session.id if session else None
+    incident = _open_alert_for(db, camera_id, event, now, window, session_id)
     equipment = db.query(models.SafetyEquipment).filter_by(id=event.equipment_id).first()
     if incident is not None and any(f.equipment_id == event.equipment_id and f.detail == event.detail
                                     for f in incident_faults(db, incident)):
@@ -178,6 +182,7 @@ def record_system_fault(
             created_by=None,
             rule_code=event.rule_code,
             track_id=event.track_id,
+            session_id=session_id,
         )
         db.add(incident)
         db.flush()
@@ -219,30 +224,6 @@ def escalation_seconds() -> float:
         return max(0.0, float(os.environ.get('SAFEVISION_ESCALAR_MIN', '5')) * 60)
     except ValueError:
         return 300.0
-
-
-def test_mode_enabled() -> bool:
-    """Fase de prueba: permite borrar incidencias de prueba. SAFEVISION_MODO_PRUEBA=0 lo desactiva."""
-    import os
-    return os.environ.get('SAFEVISION_MODO_PRUEBA', '1').strip().lower() not in ('0', 'false', 'no')
-
-
-def clear_workshop_incidents(db: Session, workshop_id: int) -> int:
-    """Borra las incidencias de un taller con sus faltas y capturas. Solo para la fase de prueba."""
-    from app.modules.ai_vision.capture import delete_capture
-
-    incidents = db.query(models.Incident).filter_by(workshop_id=workshop_id).all()
-    ids = [incident.id for incident in incidents]
-    if not ids:
-        return 0
-    faults = db.query(models.IncidentFault).filter(models.IncidentFault.incident_id.in_(ids)).all()
-    for path in {f.capture_path for f in faults} | {i.capture_path for i in incidents}:
-        if path:
-            delete_capture(path)
-    db.query(models.IncidentFault).filter(models.IncidentFault.incident_id.in_(ids)).delete(synchronize_session=False)
-    db.query(models.Incident).filter(models.Incident.id.in_(ids)).delete(synchronize_session=False)
-    db.commit()
-    return len(ids)
 
 
 def active_camera(db: Session, camera_id: int) -> Camera | None:

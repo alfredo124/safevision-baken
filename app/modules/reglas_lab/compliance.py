@@ -82,6 +82,9 @@ class PersonDetection:
     # Puntos clave de pose. Si existen, la visibilidad y la asociación del EPP
     # se calculan con coordenadas reales del cuerpo en lugar de zonas de la caja.
     keypoints: tuple[Keypoint, ...] | None = None
+    # Proporción de píxeles claros y poco saturados (blanco o gris claro) en el torso, calculada por el
+    # detector con la imagen (detectors.torso_light). None = sin dato: se usa la confianza del modelo.
+    torso_light: float | None = None
 
 
 @dataclass(frozen=True)
@@ -97,7 +100,10 @@ class ComplianceConfig:
     # Periodo provisional decidido con el usuario (2026-11-05): 10 s de ventana y 8 s
     # verificados, probado solo con videos editados de YouTube. Recalibrar con el
     # video propio de cámara fija.
-    window_seconds: float = 10.0
+    # 12 s desde el 2026-11-12 (antes 10): con 10 s de ventana y 8 s verificados, una cámara analizada
+    # cada ~3-3.5 s (varias cámaras por turnos) nunca juntaba 8 s de muestras dentro de la ventana y no
+    # alertaba nunca. Con 12 s, los videos etiquetados dan las mismas faltas de 2 análisis/s a uno cada 4.5 s.
+    window_seconds: float = 12.0
     min_verified_seconds: float = 8.0
     # Con varias cámaras en CPU cada una se analiza ~0.3 veces/s: 3 muestras en la ventana
     # es lo que se consigue en 10 s. Más muestras impedirían alertar.
@@ -128,10 +134,26 @@ class ComplianceConfig:
     # Al confirmar la falta: si al menos esta proporción de las muestras sin el EPP bien puesto
     # lo vio mal puesto (bata abierta, lentes fuera de los ojos), la falta es leve; si no, es grave
     # (sin el EPP). Sin bata, ~53 % de los frames no detecta nada.
-    misplaced_min_ratio: float = 0.8
+    # 0.5 desde el 2026-11-12 (antes 0.8): una bata vista abierta casi siempre, con un par de fallos
+    # sueltos de detección, acababa como "falta bata" grave. En los videos etiquetados del equipo
+    # 0.5 y 0.8 dan las mismas faltas y gravedades; en video de stock, 3 de 5 graves pasan a leves.
+    misplaced_min_ratio: float = 0.5
     misplaced_severity: str = 'MEDIO'
     # Sin caderas visibles se evalúa la parte alta del torso (0 = desactivado). Calibrar.
     coat_upper_torso_ratio: float = 0.8
+    # Color de la bata (con torso_light). Medido el 2026-11-12, proporción de torso claro p10-p90:
+    # sin bata (polo oscuro) 0.00-0.04, bata abierta 0.48-0.85, bata cerrada 0.86-1.00 (videos del
+    # equipo) y bata en video de stock 0.78-1.00. El modelo, en cambio, daba la misma confianza
+    # (0.3-0.7) a un polo oscuro que a una bata de otra cámara: con el umbral de confianza las batas de
+    # otras cámaras salían "abiertas" o "faltantes".
+    # Menos torso claro que esto: la "bata" detectada es otra prenda y se ignora.
+    coat_min_light: float = 0.3
+    # Torso cubierto y al menos así de claro: bata puesta y cerrada, sin mirar la confianza del modelo.
+    coat_closed_min_light: float = 0.8
+    # Con pose, una persona solo se evalúa si se ve al menos un hombro. Medido el 2026-11-12: en los
+    # videos de stock el 11-14 % de las "personas" eran manos o caras sueltas (primeros planos) que
+    # generaban faltas de guantes y lentes; en los videos de cámara fija del equipo, 0 %.
+    require_shoulder: bool = True
 
     def __post_init__(self) -> None:
         if not 0 <= self.violation_max_present_ratio < self.compliant_min_present_ratio <= 1:
@@ -276,6 +298,12 @@ def _torso_box(person: PersonDetection, min_conf: float, upper_torso_ratio: floa
     return (x1, min(ys), x2, max(ys))
 
 
+def torso_for_color(person: PersonDetection, config: 'ComplianceConfig | None' = None) -> Box | None:
+    """Torso que el detector usa para medir el color de la ropa (el mismo que evalúa la bata)."""
+    config = config or ComplianceConfig()
+    return _torso_box(person, config.min_keypoint_confidence, config.coat_upper_torso_ratio)
+
+
 def _coverage(inner: Box, outer: Box) -> float:
     """Proporción de `inner` cubierta por `outer`."""
     width = max(0.0, min(inner[2], outer[2]) - max(inner[0], outer[0]))
@@ -369,6 +397,10 @@ class ComplianceEngine:
             return {}
         if person.visible_slots is not None and slot not in person.visible_slots:
             return {}
+        if config.require_shoulder and not _visible_points(person, SHOULDER_KEYPOINTS, min_conf):
+            # Solo manos o solo cara (primer plano): no se sabe de quién son ni si la persona está
+            # en el encuadre; el modelo de pose llega a inventar una cara sobre unas manos.
+            return {}
         if slot in SLOT_HANDS:
             return _visible_points(person, WRIST_KEYPOINTS, min_conf)
         if slot in SLOT_HEAD:
@@ -392,6 +424,7 @@ class ComplianceEngine:
         """
         config = self.config
         heights = {p.track_id: max(1.0, p.box[3] - p.box[1]) for p in persons}
+        light = {p.track_id: p.torso_light for p in persons}
         samples: dict[tuple[int, str], _Sample] = {}
         for rule in self.rules:
             parts = {person.track_id: self._visible_parts(person, rule.slot) for person in persons}
@@ -411,6 +444,8 @@ class ComplianceEngine:
                         if rule.slot in SLOT_BODY:
                             coverage = _coverage(part, item.box)
                             ok, cost = coverage >= config.coat_open_min_coverage, 1.0 - coverage
+                            if light[track_id] is not None and light[track_id] < config.coat_min_light:
+                                ok = False  # torso oscuro: el modelo confundió la ropa con una bata
                         else:
                             limit = (config.glove_max_wrist_distance if rule.slot in SLOT_HANDS
                                      else config.goggles_max_face_distance)
@@ -429,9 +464,12 @@ class ComplianceEngine:
                     partial[misplaced[1]] |= set(parts[misplaced[1]])
                 if best:
                     if rule.slot in SLOT_BODY:
-                        # Cerrada: cubre casi todo el torso con confianza alta. Si no, abierta.
-                        closed = (1.0 - best[0] >= config.min_coat_torso_coverage
-                                  and item.confidence >= config.coat_closed_min_confidence)
+                        # Cerrada: cubre casi todo el torso y el torso es claro (con el color) o, sin
+                        # dato de color, la confianza es alta. Si no, abierta.
+                        covers = 1.0 - best[0] >= config.min_coat_torso_coverage
+                        torso_light = light[best[1]]
+                        closed = covers and (torso_light >= config.coat_closed_min_light if torso_light is not None
+                                             else item.confidence >= config.coat_closed_min_confidence)
                     (covered if closed else partial)[best[1]] |= best[2]
 
             for track_id, person_parts in parts.items():
@@ -441,6 +479,12 @@ class ComplianceEngine:
                     sample = _Sample.PRESENT
                 elif set(person_parts) <= covered[track_id] | partial[track_id]:
                     sample = _Sample.PARTIAL
+                elif (rule.slot in SLOT_BODY and light[track_id] is not None
+                      and light[track_id] >= config.coat_min_light):
+                    # Bata no detectada, pero el torso es claro: puede ser una bata que el modelo no vio
+                    # (tapada por las manos, de lado). No es prueba de que falte. Sin bata, el torso
+                    # medido nunca pasó de 0.04 en los videos del equipo.
+                    sample = _Sample.UNKNOWN
                 else:
                     sample = _Sample.ABSENT
                 samples[(track_id, rule.equipment_id)] = sample
@@ -583,6 +627,7 @@ def observation_from_record(record: Mapping) -> FrameObservation:
             tuple(float(value) for value in detection['box']),
             float(detection['conf']),
             keypoints=tuple(tuple(float(v) for v in kp) for kp in keypoints) if keypoints else None,
+            torso_light=detection.get('torso_light'),
         ))
     for detection in record.get('equipment', []):
         if detection['name'] != 'person':
