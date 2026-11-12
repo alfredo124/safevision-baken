@@ -32,16 +32,15 @@ class ReviewTest(unittest.TestCase):
         cls._original_dir = capture.CAPTURE_DIR
         capture.CAPTURE_DIR = cls.capture_dir
         with database.SessionLocal() as db:
-            for username, role, name in [('rev_quimica', UserRole.ENCARGADO_QUIMICA, 'Ana Química'),
-                                         ('rev_fisica', UserRole.ENCARGADO_FISICA, 'Luis Física')]:
-                if not db.query(User).filter_by(username=username).first():
-                    db.add(User(username=username, hashed_password=get_password_hash('x123456'),
-                                full_name=name, role=role))
+            from tests.ayuda import encargado_con_laboratorio
             camera = Camera(name='Cam revisión', laboratory_type='QUIMICA', stream_url='cam-review')
             workshop = models.Workshop(name='Química revisión', laboratory_type='QUIMICA')
             db.add_all([camera, workshop])
             db.commit()
             cls.camera_id, cls.workshop_id = camera.id, workshop.id
+            encargado_con_laboratorio(db, 'rev_quimica', 'QUIMICA', full_name='Ana Química',
+                                      workshop_id=workshop.id, camera_ids=[camera.id])
+            encargado_con_laboratorio(db, 'rev_fisica', 'FISICA', full_name='Luis Física')
         cls.quimica = headers('rev_quimica', 'ENCARGADO_QUIMICA')
         cls.fisica = headers('rev_fisica', 'ENCARGADO_FISICA')
 

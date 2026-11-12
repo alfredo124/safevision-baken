@@ -68,14 +68,14 @@ class RolePermissionsTest(unittest.TestCase):
         from tools.create_admin import create_admin
         create_admin('admin_test', 'admin-pass', 'Admin Pruebas')
         with database.SessionLocal() as db:
-            for username, role in (('mc_quimica', UserRole.ENCARGADO_QUIMICA), ('mc_fisica', UserRole.ENCARGADO_FISICA)):
-                if not db.query(User).filter_by(username=username).first():
-                    db.add(User(username=username, hashed_password=get_password_hash('x123456'), full_name=username, role=role))
+            from tests.ayuda import encargado_con_laboratorio
             chem = Camera(name='MC química', laboratory_type='QUIMICA', stream_url='mc-q')
             phys = Camera(name='MC física', laboratory_type='FISICA', stream_url='mc-f')
             db.add_all([chem, phys])
             db.commit()
             cls.chem, cls.phys = chem.id, phys.id
+            encargado_con_laboratorio(db, 'mc_quimica', 'QUIMICA', camera_ids=[chem.id])
+            encargado_con_laboratorio(db, 'mc_fisica', 'FISICA', camera_ids=[phys.id])
         cls.admin = headers('admin_test', 'ADMINISTRADOR')
         cls.quimica = headers('mc_quimica', 'ENCARGADO_QUIMICA')
         cls.fisica = headers('mc_fisica', 'ENCARGADO_FISICA')

@@ -55,11 +55,19 @@ class AuthPermissionsTest(unittest.TestCase):
         self.assertEqual(response.status_code, 403)
 
     def test_admin_can_create_user(self):
+        from app.modules.reglas_lab.models import Workshop
+        with database.SessionLocal() as db:
+            workshop = Workshop(name='Física auth', laboratory_type='FISICA')
+            db.add(workshop)
+            db.commit()
+            workshop_id = workshop.id
+        # El rol del encargado (Química o Física) sale de su laboratorio asignado.
         response = self.client.post(
-            USERS, json={**NEW_USER, 'username': 'creado_por_admin', 'role': 'ENCARGADO_FISICA'},
+            USERS, json={**NEW_USER, 'username': 'creado_por_admin', 'role': 'ENCARGADO_QUIMICA',
+                         'workshop_id': workshop_id},
             headers=self.admin,
         )
-        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.status_code, 201, response.text)
         self.assertEqual(response.json()['role'], 'ENCARGADO_FISICA')
         self.assertNotIn('password', response.json())
         self.assertNotIn('hashed_password', response.json())

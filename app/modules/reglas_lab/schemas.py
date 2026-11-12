@@ -31,10 +31,43 @@ class SafetyEquipmentResponse(SafetyEquipmentCreate):
     model_config = ConfigDict(from_attributes=True)
 
 
+class CampusCreate(BaseModel):
+    name: str = Field(min_length=2, max_length=120)
+    city: str | None = Field(default=None, max_length=80)
+    address: str | None = Field(default=None, max_length=200)
+
+
+class CampusUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=2, max_length=120)
+    city: str | None = Field(default=None, max_length=80)
+    address: str | None = Field(default=None, max_length=200)
+    is_active: bool | None = None
+
+
+class CampusResponse(BaseModel):
+    id: int
+    name: str
+    city: str | None
+    address: str | None
+    is_active: bool
+    workshop_count: int = 0
+
+    class Config:
+        from_attributes = True
+
+
 class WorkshopCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     laboratory_type: LaboratoryType
     description: str | None = Field(default=None, max_length=500)
+    campus_id: int | None = None
+
+
+class WorkshopUpdate(BaseModel):
+    """Datos generales del laboratorio (solo el administrador general)."""
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    description: str | None = Field(default=None, max_length=500)
+    campus_id: int | None = None
 
 
 class CameraSummary(BaseModel):
@@ -62,6 +95,8 @@ class WorkshopResponse(BaseModel):
     name: str
     laboratory_type: LaboratoryType
     description: str | None
+    campus_id: int | None = None
+    campus_name: str | None = None
     cameras: list[CameraSummary]
     required_equipment_ids: list[str]
     rules: list[WorkshopRuleResponse] = Field(default_factory=list)

@@ -34,11 +34,8 @@ def get_camera_for_user(camera_id: int, db: Session, current_user):
     camera = db.query(models.Camera).filter(models.Camera.id == camera_id, models.Camera.is_active.is_(True)).first()
     if not camera:
         raise HTTPException(status_code=404, detail='Cámara no encontrada')
-    role = current_user.role.value
-    if role == 'ENCARGADO_QUIMICA' and camera.laboratory_type != 'QUIMICA':
-        raise HTTPException(status_code=403, detail='No tienes acceso a esta cámara')
-    if role == 'ENCARGADO_FISICA' and camera.laboratory_type != 'FISICA':
-        raise HTTPException(status_code=403, detail='No tienes acceso a esta cámara')
+    from app.core.permisos import ensure_camera_access
+    ensure_camera_access(db, current_user, camera.id)  # encargado: solo cámaras de su laboratorio
     return camera
 
 
@@ -208,12 +205,12 @@ def performance_profile(current_user=Depends(get_current_user)):
 
 @router.get('/cameras', response_model=list[schemas.CameraResponse])
 def get_cameras(db: Session = Depends(get_db), current_user = Depends(get_current_user)):
+    from app.core.permisos import allowed_camera_ids
     query = db.query(models.Camera).filter(models.Camera.is_active == True)
-    if current_user.role.value == 'ENCARGADO_QUIMICA':
-        query = query.filter(models.Camera.laboratory_type == 'QUIMICA')
-    elif current_user.role.value == 'ENCARGADO_FISICA':
-        query = query.filter(models.Camera.laboratory_type == 'FISICA')
-    
+    allowed = allowed_camera_ids(db, current_user)  # encargado: solo las de su laboratorio
+    if allowed is not None:
+        query = query.filter(models.Camera.id.in_(allowed))
+
     from app.modules.ai_vision.browser_ingest import is_browser_source, station_busy
     cameras = query.all()
     for camera in cameras:  # para que la estación no ofrezca una cámara que ya transmite otro equipo

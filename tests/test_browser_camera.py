@@ -34,12 +34,13 @@ class BrowserCameraApiTest(unittest.TestCase):
         cls.client = TestClient(app)
         cls.client.__enter__()
         with database.SessionLocal() as db:
-            for username, role in (('bc_quimica', UserRole.ENCARGADO_QUIMICA), ('bc_fisica', UserRole.ENCARGADO_FISICA)):
-                if not db.query(User).filter_by(username=username).first():
-                    db.add(User(username=username, hashed_password=get_password_hash('x123456'), full_name=username, role=role))
+            from tests.ayuda import encargado_con_laboratorio
             db.add(Camera(name='Archivo', laboratory_type='QUIMICA', stream_url='video.mp4'))
             db.commit()
             cls.file_camera = db.query(Camera).filter_by(stream_url='video.mp4').first().id
+            # Las cámaras que crea cada encargado quedan en su laboratorio.
+            cls.lab_quimica = encargado_con_laboratorio(db, 'bc_quimica', 'QUIMICA', camera_ids=[cls.file_camera])
+            encargado_con_laboratorio(db, 'bc_fisica', 'FISICA')
         cls.quimica = headers('bc_quimica', 'ENCARGADO_QUIMICA')
         cls.quimica_token = create_access_token({'sub': 'bc_quimica', 'role': 'ENCARGADO_QUIMICA'})
         cls.fisica_token = create_access_token({'sub': 'bc_fisica', 'role': 'ENCARGADO_FISICA'})
@@ -124,6 +125,9 @@ class BrowserCameraApiTest(unittest.TestCase):
         with database.SessionLocal() as db:
             camera = Camera(name='Video abierto', laboratory_type='QUIMICA', stream_url=str(video))
             db.add(camera)
+            db.flush()
+            from app.modules.reglas_lab.models import WorkshopCamera
+            db.add(WorkshopCamera(workshop_id=self.lab_quimica, camera_id=camera.id))
             db.commit()
             camera_id = camera.id
         real_unlink, calls = type(video).unlink, []

@@ -2,13 +2,13 @@ from datetime import date, datetime, time, timezone
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.database import SessionLocal
+from app.core.permisos import allowed_camera_ids, allowed_workshop_ids, can_access_workshop, is_admin
 from app.modules.ai_vision.models import Camera
-from app.modules.auth_db.dependencies import get_current_user
+from app.modules.auth_db.dependencies import get_current_user, require_admin
 from app.modules.auth_db.models import User
 from app.modules.reglas_lab import models, schemas
 
@@ -28,9 +28,8 @@ def _role(current_user) -> str:
 
 
 def _ensure_workshop_access(workshop: models.Workshop, current_user) -> None:
-    role = _role(current_user)
-    permitted_area = {'ENCARGADO_QUIMICA': 'QUIMICA', 'ENCARGADO_FISICA': 'FISICA'}.get(role)
-    if role != 'ADMINISTRADOR' and permitted_area != workshop.laboratory_type:
+    # Encargado: solo su laboratorio asignado (app/core/permisos.py).
+    if not can_access_workshop(current_user, workshop.id):
         raise HTTPException(status_code=403, detail='No tienes acceso a este taller')
 
 
@@ -58,6 +57,18 @@ def effective_rule(rule: models.WorkshopEquipmentRule, equipment: models.SafetyE
     }
 
 
+def _campus_name(db: Session, campus_id: int | None) -> str | None:
+    campus = db.get(models.Campus, campus_id) if campus_id else None
+    return campus.name if campus else None
+
+
+def _check_campus(db: Session, campus_id: int | None) -> None:
+    if campus_id is not None:
+        campus = db.get(models.Campus, campus_id)
+        if campus is None or not campus.is_active:
+            raise HTTPException(status_code=400, detail='El local indicado no existe')
+
+
 def _workshop_response(db: Session, workshop: models.Workshop) -> dict:
     cameras = (
         db.query(Camera)
@@ -79,6 +90,8 @@ def _workshop_response(db: Session, workshop: models.Workshop) -> dict:
         'name': workshop.name,
         'laboratory_type': workshop.laboratory_type,
         'description': workshop.description,
+        'campus_id': workshop.campus_id,
+        'campus_name': _campus_name(db, workshop.campus_id),
         'cameras': [_camera_summary(camera) for camera in cameras],
         'required_equipment_ids': required_ids,
         'rules': [effective_rule(rule, equipment) for rule, equipment in rule_rows],
@@ -163,12 +176,13 @@ def _escalation(incident) -> dict:
 
 @router.get('/configuration', response_model=schemas.RulesConfigurationResponse)
 def get_configuration(db: Session = Depends(get_db), current_user=Depends(get_current_user)):
-    permitted_area = {'ENCARGADO_QUIMICA': 'QUIMICA', 'ENCARGADO_FISICA': 'FISICA'}.get(_role(current_user))
     workshops_query = db.query(models.Workshop).filter(models.Workshop.is_active.is_(True))
     cameras_query = db.query(Camera).filter(Camera.is_active.is_(True))
-    if permitted_area:
-        workshops_query = workshops_query.filter(models.Workshop.laboratory_type == permitted_area)
-        cameras_query = cameras_query.filter(Camera.laboratory_type == permitted_area)
+    allowed = allowed_workshop_ids(current_user)
+    if allowed is not None:
+        # Encargado: su laboratorio. Las cámaras sin laboratorio las asigna el administrador.
+        workshops_query = workshops_query.filter(models.Workshop.id.in_(allowed))
+        cameras_query = cameras_query.filter(Camera.id.in_(allowed_camera_ids(db, current_user) or set()))
 
     workshops = workshops_query.order_by(models.Workshop.name).all()
     catalog = db.query(models.SafetyEquipment).filter_by(is_active=True).order_by(models.SafetyEquipment.name).all()
@@ -188,15 +202,16 @@ def create_workshop(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
-    _ensure_can_manage(current_user)
-    permitted_area = {'ENCARGADO_QUIMICA': 'QUIMICA', 'ENCARGADO_FISICA': 'FISICA'}.get(_role(current_user))
-    if permitted_area and payload.laboratory_type != permitted_area:
-        raise HTTPException(status_code=403, detail='No puedes crear un taller para otra área')
+    # Los laboratorios pertenecen a un local: los crea el administrador general.
+    if not is_admin(current_user):
+        raise HTTPException(status_code=403, detail='Solo el administrador general crea laboratorios')
 
+    _check_campus(db, payload.campus_id)
     workshop = models.Workshop(
         name=payload.name.strip(),
         laboratory_type=payload.laboratory_type,
         description=payload.description,
+        campus_id=payload.campus_id,
     )
     db.add(workshop)
     try:
@@ -222,6 +237,10 @@ def update_workshop_configuration(
     _ensure_workshop_access(workshop, current_user)
 
     camera_ids = set(payload.camera_ids)
+    allowed_cameras = allowed_camera_ids(db, current_user)
+    if allowed_cameras is not None and not camera_ids <= allowed_cameras:
+        # Un encargado solo puede quitar o dejar cámaras de su laboratorio; las nuevas las asigna el administrador.
+        raise HTTPException(status_code=403, detail='Solo el administrador puede asignar otras cámaras a este laboratorio')
     if payload.rules is not None:
         requested_rules = {rule.equipment_id: rule for rule in payload.rules}
     else:
@@ -324,9 +343,9 @@ def list_incidents(
         .outerjoin(models.SafetyEquipment, models.SafetyEquipment.id == models.Incident.equipment_id)
         .outerjoin(User, User.id == models.Incident.reviewed_by)
     )
-    permitted_area = {'ENCARGADO_QUIMICA': 'QUIMICA', 'ENCARGADO_FISICA': 'FISICA'}.get(_role(current_user))
-    if permitted_area:
-        query = query.filter(func.coalesce(models.Incident.laboratory_type, models.Workshop.laboratory_type) == permitted_area)
+    allowed = allowed_workshop_ids(current_user)
+    if allowed is not None:  # encargado: incidencias de su laboratorio
+        query = query.filter(models.Incident.workshop_id.in_(allowed))
     if workshop_id is not None:
         query = query.filter(models.Incident.workshop_id == workshop_id)
     if camera_id is not None:
@@ -577,3 +596,67 @@ def fault_capture(incident_id: int, fault_id: int, db: Session = Depends(get_db)
 def incident_capture(incident_id: int, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
     """Primera captura de la incidencia, solo para quien puede ver ese taller."""
     return _serve_capture(db, incident_id, current_user)
+
+
+# --- Locales (sedes) y datos generales de los laboratorios: solo el administrador general ---
+
+def _campus_response(db: Session, campus: models.Campus) -> dict:
+    count = db.query(models.Workshop).filter(models.Workshop.campus_id == campus.id,
+                                             models.Workshop.is_active.is_(True)).count()
+    return {'id': campus.id, 'name': campus.name, 'city': campus.city, 'address': campus.address,
+            'is_active': campus.is_active, 'workshop_count': count}
+
+
+@router.get('/campuses', response_model=list[schemas.CampusResponse])
+def list_campuses(db: Session = Depends(get_db), _user=Depends(get_current_user)):
+    return [_campus_response(db, campus) for campus in db.query(models.Campus).order_by(models.Campus.name).all()]
+
+
+@router.post('/campuses', response_model=schemas.CampusResponse, status_code=status.HTTP_201_CREATED)
+def create_campus(payload: schemas.CampusCreate, db: Session = Depends(get_db), _admin=Depends(require_admin)):
+    campus = models.Campus(name=payload.name.strip(), city=payload.city, address=payload.address)
+    db.add(campus)
+    try:
+        db.commit()
+    except IntegrityError as error:
+        db.rollback()
+        raise HTTPException(status_code=409, detail='Ya existe un local con ese nombre') from error
+    db.refresh(campus)
+    return _campus_response(db, campus)
+
+
+@router.patch('/campuses/{campus_id}', response_model=schemas.CampusResponse)
+def update_campus(campus_id: int, payload: schemas.CampusUpdate, db: Session = Depends(get_db),
+                  _admin=Depends(require_admin)):
+    campus = db.get(models.Campus, campus_id)
+    if campus is None:
+        raise HTTPException(status_code=404, detail='Local no encontrado')
+    for field, value in payload.model_dump(exclude_unset=True).items():
+        setattr(campus, field, value.strip() if isinstance(value, str) else value)
+    try:
+        db.commit()
+    except IntegrityError as error:
+        db.rollback()
+        raise HTTPException(status_code=409, detail='Ya existe un local con ese nombre') from error
+    db.refresh(campus)
+    return _campus_response(db, campus)
+
+
+@router.patch('/workshops/{workshop_id}', response_model=schemas.WorkshopResponse)
+def update_workshop(workshop_id: int, payload: schemas.WorkshopUpdate, db: Session = Depends(get_db),
+                    _admin=Depends(require_admin)):
+    workshop = db.get(models.Workshop, workshop_id)
+    if workshop is None or not workshop.is_active:
+        raise HTTPException(status_code=404, detail='Taller no encontrado')
+    changes = payload.model_dump(exclude_unset=True)
+    if 'campus_id' in changes:
+        _check_campus(db, changes['campus_id'])
+    for field, value in changes.items():
+        setattr(workshop, field, value.strip() if isinstance(value, str) else value)
+    try:
+        db.commit()
+    except IntegrityError as error:
+        db.rollback()
+        raise HTTPException(status_code=409, detail='Ya existe un taller con ese nombre y área') from error
+    db.refresh(workshop)
+    return _workshop_response(db, workshop)

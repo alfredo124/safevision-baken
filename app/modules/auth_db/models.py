@@ -19,6 +19,9 @@ class User(Base):
     phone = Column(String, nullable=True)
     email = Column(String, nullable=True)
     role = Column(Enum(UserRole), default=UserRole.ENCARGADO_QUIMICA)
+    # Laboratorio asignado (lab_workshops.id); su local es el del laboratorio. None para el administrador
+    # general. Sin ForeignKey declarada: la tabla de laboratorios vive en otro módulo.
+    workshop_id = Column(Integer, nullable=True, index=True)
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 

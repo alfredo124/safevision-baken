@@ -24,25 +24,40 @@ def get_db():
         db.close()
 
 
-def authorize_camera_creation(current_user, laboratory_type: str):
-    role_to_laboratory = {
-        'ENCARGADO_QUIMICA': 'QUIMICA',
-        'ENCARGADO_FISICA': 'FISICA',
-    }
-    role = current_user.role.value
-    if role != 'ADMINISTRADOR' and role not in role_to_laboratory:
-        raise HTTPException(status_code=403, detail='No tienes permiso para registrar cámaras')
-    if role in role_to_laboratory and laboratory_type != role_to_laboratory[role]:
+def authorize_camera_creation(db: Session, current_user, laboratory_type: str):
+    """El administrador registra cámaras de cualquier área. Un encargado, solo para su laboratorio:
+    devuelve ese laboratorio para asociarle la cámara nueva (None para el administrador)."""
+    from app.core.permisos import assigned_workshop, is_admin
+    if is_admin(current_user):
+        return None
+    workshop = assigned_workshop(db, current_user)
+    if laboratory_type != workshop.laboratory_type:
         raise HTTPException(status_code=403, detail='No puedes registrar cámaras para otra área')
+    return workshop
+
+
+def link_to_workshop(db: Session, camera: models.Camera, workshop) -> None:
+    """Asocia la cámara recién creada al laboratorio del encargado; si la práctica está en curso,
+    empieza a analizarse sin reiniciarla."""
+    if workshop is None:
+        return
+    from app.modules.reglas_lab.models import WorkshopCamera
+    db.add(WorkshopCamera(workshop_id=workshop.id, camera_id=camera.id))
+    db.commit()
+    from app.modules.reglas_lab import monitoring
+    if monitoring.is_active(workshop.id):
+        previous = {row.camera_id for row in db.query(WorkshopCamera.camera_id).filter_by(workshop_id=workshop.id)} - {camera.id}
+        monitoring.sync_workshop(db, workshop.id, previous)
 
 
 @router.post('/cameras', response_model=schemas.CameraResponse)
 def create_camera(camera: schemas.CameraCreate, db: Session = Depends(get_db), current_user = Depends(get_current_user)):
-    authorize_camera_creation(current_user, camera.laboratory_type)
+    workshop = authorize_camera_creation(db, current_user, camera.laboratory_type)
     db_camera = models.Camera(**camera.model_dump(), status='offline')
     db.add(db_camera)
     db.commit()
     db.refresh(db_camera)
+    link_to_workshop(db, db_camera, workshop)
     return db_camera
 
 
@@ -54,7 +69,7 @@ def create_browser_camera(
 ):
     """Cámara alimentada por una "estación de cámara" del navegador (celular o laptop)."""
     from app.modules.ai_vision.browser_ingest import BROWSER_PREFIX
-    authorize_camera_creation(current_user, payload.laboratory_type)
+    workshop = authorize_camera_creation(db, current_user, payload.laboratory_type)
     camera = models.Camera(
         name=payload.name.strip(),
         laboratory_type=payload.laboratory_type,
@@ -65,6 +80,7 @@ def create_browser_camera(
     db.add(camera)
     db.commit()
     db.refresh(camera)
+    link_to_workshop(db, camera, workshop)
     return camera
 
 
@@ -108,7 +124,7 @@ async def create_camera_with_video(
     db: Session = Depends(get_db),
     current_user = Depends(get_current_user),
 ):
-    authorize_camera_creation(current_user, laboratory_type)
+    workshop = authorize_camera_creation(db, current_user, laboratory_type)
     if bool(stream_url and stream_url.strip()) == bool(video):
         raise HTTPException(status_code=400, detail='Indica una URL de cámara o carga un video, no ambos')
 
@@ -156,6 +172,7 @@ async def create_camera_with_video(
         if stored_video_path:
             stored_video_path.unlink(missing_ok=True)
         raise
+    link_to_workshop(db, db_camera, workshop)
     return db_camera
 
 
@@ -207,7 +224,8 @@ def delete_camera(
     if not camera:
         raise HTTPException(status_code=404, detail='Cámara no encontrada')
 
-    authorize_camera_creation(current_user, camera.laboratory_type)
+    from app.core.permisos import ensure_camera_access
+    ensure_camera_access(db, current_user, camera.id)
     from app.modules.reglas_lab.models import Incident, WorkshopCamera
 
     has_history = db.query(Incident.id).filter_by(camera_id=camera.id).first() is not None

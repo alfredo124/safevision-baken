@@ -5,6 +5,18 @@ from sqlalchemy import Boolean, Column, DateTime, Float, ForeignKey, Integer, JS
 from app.core.database import Base
 
 
+class Campus(Base):
+    """Local (sede) de la universidad. Lo registra el administrador general; cada laboratorio pertenece a uno."""
+    __tablename__ = 'lab_campuses'
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(120), nullable=False, unique=True)
+    city = Column(String(80), nullable=True)
+    address = Column(String(200), nullable=True)
+    is_active = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+
 class Workshop(Base):
     __tablename__ = 'lab_workshops'
     __table_args__ = (UniqueConstraint('name', 'laboratory_type', name='uq_lab_workshop_name_area'),)
@@ -13,6 +25,8 @@ class Workshop(Base):
     name = Column(String(120), nullable=False)
     laboratory_type = Column(String(20), nullable=False)
     description = Column(String(500), nullable=True)
+    # Local donde está el laboratorio. None en laboratorios creados antes de registrar locales.
+    campus_id = Column(Integer, ForeignKey('lab_campuses.id'), nullable=True, index=True)
     is_active = Column(Boolean, nullable=False, default=True)
     created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))

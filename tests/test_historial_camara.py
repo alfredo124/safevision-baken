@@ -28,10 +28,9 @@ class CameraHistoryTest(unittest.TestCase):
         cls.client = TestClient(app)
         cls.client.__enter__()
         with database.SessionLocal() as db:
-            for username, role in (('hist_quimica', UserRole.ENCARGADO_QUIMICA), ('hist_fisica', UserRole.ENCARGADO_FISICA)):
-                if not db.query(User).filter_by(username=username).first():
-                    db.add(User(username=username, hashed_password=get_password_hash('x123456'), full_name=username, role=role))
-            db.commit()
+            from tests.ayuda import encargado_con_laboratorio
+            cls.lab_quimica = encargado_con_laboratorio(db, 'hist_quimica', 'QUIMICA')
+            encargado_con_laboratorio(db, 'hist_fisica', 'FISICA')
         cls.quimica = headers('hist_quimica', 'ENCARGADO_QUIMICA')
         cls.fisica = headers('hist_fisica', 'ENCARGADO_FISICA')
 
@@ -42,8 +41,8 @@ class CameraHistoryTest(unittest.TestCase):
     def _camera_with_alert(self, name):
         with database.SessionLocal() as db:
             camera = Camera(name=name, laboratory_type='QUIMICA', stream_url=f'cam-{uuid4().hex[:6]}')
-            workshop = models.Workshop(name=f'Química historial {uuid4().hex[:6]}', laboratory_type='QUIMICA')
-            db.add_all([camera, workshop])
+            workshop = db.get(models.Workshop, self.lab_quimica)  # el laboratorio del encargado
+            db.add(camera)
             db.flush()
             db.add(models.WorkshopCamera(workshop_id=workshop.id, camera_id=camera.id))
             db.commit()
@@ -94,6 +93,8 @@ class CameraHistoryTest(unittest.TestCase):
         with database.SessionLocal() as db:
             camera = Camera(name='Sin historial', laboratory_type='QUIMICA', stream_url='cam-sin-historial')
             db.add(camera)
+            db.flush()
+            db.add(models.WorkshopCamera(workshop_id=self.lab_quimica, camera_id=camera.id))
             db.commit()
             camera_id = camera.id
         self.assertEqual(self.client.delete(f'/modules/ai_vision/cameras/{camera_id}', headers=self.quimica).status_code, 204)
