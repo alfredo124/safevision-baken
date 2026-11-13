@@ -26,10 +26,14 @@ class User(Base):
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 class ActivityLog(Base):
+    """Bitácora: quién hizo qué, cuándo y desde qué equipo (ver app/core/bitacora.py)."""
     __tablename__ = 'activity_logs'
     id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey('users.id'))
-    action = Column(String, nullable=False)
-    module_affected = Column(String, nullable=False)
-    timestamp = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    user_id = Column(Integer, ForeignKey('users.id'))  # None: intento de acceso sin usuario válido
+    # Nombre del usuario en ese momento: la bitácora no cambia si después se renombra.
+    user_name = Column(String(120), nullable=True)
+    action = Column(String, nullable=False)  # código corto, p. ej. CONFIRMAR_ALERTA
+    module_affected = Column(String, nullable=False)  # usuarios, locales, laboratorios, camaras, ...
+    description = Column(String(500), nullable=True)  # texto legible: qué se cambió
+    timestamp = Column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
     ip_address = Column(String, nullable=True)

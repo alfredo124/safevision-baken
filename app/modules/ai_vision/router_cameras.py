@@ -4,6 +4,7 @@ from uuid import uuid4
 import cv2
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy.orm import Session
+from app.core.bitacora import registrar
 from app.core.database import SessionLocal
 from app.modules.ai_vision import models, schemas
 from app.modules.auth_db.dependencies import get_current_user
@@ -36,6 +37,11 @@ def authorize_camera_creation(db: Session, current_user, laboratory_type: str):
     return workshop
 
 
+def log_camera_created(db: Session, current_user, camera: models.Camera, origin: str) -> None:
+    """Bitácora: cámara registrada (sin la URL completa: puede llevar usuario y clave)."""
+    registrar(db, current_user, 'CREAR_CAMARA', 'camaras', f'{camera.name} ({camera.laboratory_type}, {origin})')
+
+
 def link_to_workshop(db: Session, camera: models.Camera, workshop) -> None:
     """Asocia la cámara recién creada al laboratorio del encargado; si la práctica está en curso,
     empieza a analizarse sin reiniciarla."""
@@ -58,6 +64,7 @@ def create_camera(camera: schemas.CameraCreate, db: Session = Depends(get_db), c
     db.commit()
     db.refresh(db_camera)
     link_to_workshop(db, db_camera, workshop)
+    log_camera_created(db, current_user, db_camera, 'fuente de video')
     return db_camera
 
 
@@ -81,6 +88,7 @@ def create_browser_camera(
     db.commit()
     db.refresh(camera)
     link_to_workshop(db, camera, workshop)
+    log_camera_created(db, current_user, camera, 'estación del navegador')
     return camera
 
 
@@ -173,6 +181,7 @@ async def create_camera_with_video(
             stored_video_path.unlink(missing_ok=True)
         raise
     link_to_workshop(db, db_camera, workshop)
+    log_camera_created(db, current_user, db_camera, 'video subido' if video else 'fuente de video')
     return db_camera
 
 
@@ -229,6 +238,7 @@ def delete_camera(
     from app.modules.reglas_lab.models import Incident, WorkshopCamera
 
     has_history = db.query(Incident.id).filter_by(camera_id=camera.id).first() is not None
+    camera_label = f'{camera.name} (id {camera.id})'  # antes de borrarla, para la bitácora
 
     stored_video_path = Path(camera.stream_url)
     try:
@@ -249,5 +259,7 @@ def delete_camera(
     else:
         db.delete(camera)
     db.commit()
+    registrar(db, current_user, 'ELIMINAR_CAMARA', 'camaras',
+              camera_label + (': se conserva su historial' if has_history else ''))
     if stored_video_path:
         remove_video_file(stored_video_path, db)

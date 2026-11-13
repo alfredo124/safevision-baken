@@ -3,6 +3,8 @@
 - "Iniciar práctica" abre una sesión (si ya hay una abierta en ese laboratorio, se sigue usando).
 - Cada incidencia guarda la sesión abierta de su laboratorio (incident_service.record_system_fault).
 - "Finalizar práctica" la cierra con la hora y el usuario.
+- Cada sesión guarda una copia de las reglas de EPP exigidas (rules_snapshot), y una versión nueva si se
+  cambian con la práctica en curso. Así el reporte de un periodo pasado muestra lo que se exigía entonces.
 - Al arrancar el servidor, las sesiones que quedaron abiertas se cierran como INTERRUMPIDA: el análisis
   vivía en memoria y ya no corre. Su fin es la última actividad conocida (la última falta registrada).
 """
@@ -32,6 +34,38 @@ def open_session_for(db: Session, workshop_id: int) -> models.PracticeSession | 
             .order_by(models.PracticeSession.id.desc()).first())
 
 
+def current_rules(db: Session, workshop_id: int) -> list[dict]:
+    """Reglas de EPP vigentes del laboratorio, con el nombre del equipo y el código y la gravedad efectivos
+    (los del reglamento o, si faltan, los del catálogo). Es lo que se copia en cada práctica."""
+    rows = (
+        db.query(models.WorkshopEquipmentRule, models.SafetyEquipment)
+        .join(models.SafetyEquipment, models.SafetyEquipment.id == models.WorkshopEquipmentRule.equipment_id)
+        .filter(models.WorkshopEquipmentRule.workshop_id == workshop_id,
+                models.WorkshopEquipmentRule.is_required.is_(True))
+        .order_by(models.WorkshopEquipmentRule.equipment_id)
+        .all()
+    )
+    return [{
+        'equipment_id': equipment.id,
+        'name': equipment.name,
+        'rule_code': rule.rule_code or equipment.missing_code,
+        'severity': rule.severity or equipment.impact,
+        'manual_verification': not equipment.model_class,  # sin detector: la revisa el encargado
+    } for rule, equipment in rows]
+
+
+def record_rules(db: Session, session: models.PracticeSession, now: datetime | None = None) -> bool:
+    """Añade a la sesión la versión vigente de las reglas si es distinta de la última guardada.
+    No hace commit. Devuelve True si añadió una versión."""
+    rules = current_rules(db, session.workshop_id)
+    versions = list(session.rules_snapshot or [])
+    if versions and versions[-1].get('rules') == rules:
+        return False
+    versions.append({'since': (now or datetime.now(timezone.utc)).isoformat(), 'rules': rules})
+    session.rules_snapshot = versions  # se reasigna la lista: SQLAlchemy no detecta cambios dentro del JSON
+    return True
+
+
 def start_session(db: Session, workshop: models.Workshop, user_id: int | None) -> models.PracticeSession:
     """Abre la sesión del laboratorio o devuelve la que ya está abierta."""
     session = open_session_for(db, workshop.id)
@@ -48,6 +82,7 @@ def start_session(db: Session, workshop: models.Workshop, user_id: int | None) -
         started_at=now,
         started_by=user_id,
     )
+    record_rules(db, session, now)
     db.add(session)
     db.commit()
     db.refresh(session)

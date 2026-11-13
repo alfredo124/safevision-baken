@@ -2,6 +2,10 @@
 lo guardado en la base (sesiones e incidencias).
 
 No hay datos de ejemplo: si en el periodo no hubo alertas, el reporte sale con ceros.
+El EPP exigido de cada laboratorio sale de las copias de reglas guardadas en sus prácticas del periodo
+(lo que se exigía entonces). Solo si el laboratorio no tuvo prácticas con copia se usa su configuración
+actual, y el reporte lo indica (required_equipment_source = 'ACTUAL').
+
 La huella SHA-256 se calcula con el contenido del reporte (sin la hora de emisión): si alguien cambia
 una incidencia del periodo y se vuelve a generar, la huella cambia.
 """
@@ -78,6 +82,7 @@ def build_report(db: Session, start: datetime, end: datetime, workshop_ids: set[
     workshops = {w.id: w for w in workshop_query.all()
                  if w.is_active or any(i.workshop_id == w.id for i in incidents)}
     campus_names = dict(db.query(models.Campus.id, models.Campus.name).all())
+    # Configuración actual: solo para laboratorios sin copia de reglas en el periodo (ver más abajo).
     required: dict[int, list[str]] = defaultdict(list)
     for rule in (db.query(models.WorkshopEquipmentRule)
                  .filter(models.WorkshopEquipmentRule.workshop_id.in_(workshops or {-1}),
@@ -113,6 +118,15 @@ def build_report(db: Session, start: datetime, end: datetime, workshop_ids: set[
             'alerts': alerts_by_session.get(session.id, 0),
         })
     session_codes = {row['id']: row['code'] for row in session_rows}
+
+    # EPP exigido en las prácticas del periodo: todas las versiones guardadas, sin repetir, en orden.
+    required_in_sessions: dict[int, list[str]] = defaultdict(list)
+    for session in sessions:
+        for version in session.rules_snapshot or []:
+            for rule in version.get('rules', []):
+                name = rule.get('name') or equipment_names.get(rule.get('equipment_id'), rule.get('equipment_id'))
+                if name not in required_in_sessions[session.workshop_id]:
+                    required_in_sessions[session.workshop_id].append(name)
     session_counts = Counter(session.workshop_id for session in sessions)
 
     rows, response_times = [], []
@@ -199,7 +213,9 @@ def build_report(db: Session, start: datetime, end: datetime, workshop_ids: set[
             'name': workshop.name,
             'laboratory_type': workshop.laboratory_type,
             'campus_name': campus_names.get(workshop.campus_id),
-            'required_equipment': required.get(workshop.id, []),
+            'required_equipment': required_in_sessions.get(workshop.id) or required.get(workshop.id, []),
+            # PRACTICAS: lo exigido en las prácticas del periodo. ACTUAL: no hubo copia; configuración de hoy.
+            'required_equipment_source': 'PRACTICAS' if required_in_sessions.get(workshop.id) else 'ACTUAL',
             **_counts(stats['statuses']),
             'faults': stats['faults'],
             'avg_response_seconds': _average(stats['times']),

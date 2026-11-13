@@ -106,13 +106,12 @@ class ReviewTest(unittest.TestCase):
         incident_id, _ = self._incident()
         self._review(incident_id, {'decision': 'CONFIRMADA', 'action': 'RETIRADO_DE_PRACTICA'}, self.quimica)
         self.assertEqual(self._review(incident_id, {'decision': 'DESCARTADA'}, self.quimica).status_code, 409)
-        patch = self.client.patch(f'{BASE}/incidents/{incident_id}/status', json={'status': 'PENDIENTE'},
-                                  headers=self.quimica)
-        self.assertEqual(patch.status_code, 409)
+        # Ya no existe una ruta para cambiar el estado sin revisor ni acción: solo /review.
         other_id, _ = self._incident()
-        patch = self.client.patch(f'{BASE}/incidents/{other_id}/status', json={'status': 'CONFIRMADA'},
-                                  headers=self.quimica)
-        self.assertEqual(patch.status_code, 422, 'Confirmar solo por /review, con revisor y acción')
+        for estado in ('PENDIENTE', 'ATENDIDO', 'CONFIRMADA'):
+            patch = self.client.patch(f'{BASE}/incidents/{other_id}/status', json={'status': estado},
+                                      headers=self.quimica)
+            self.assertIn(patch.status_code, (404, 405), 'Cambiar el estado solo por /review')
 
     def test_pending_list_filters_by_area(self):
         incident_id, _ = self._incident()

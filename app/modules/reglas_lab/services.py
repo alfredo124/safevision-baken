@@ -42,6 +42,8 @@ def initialize_reglas_lab() -> None:
     add_missing_columns('lab_incident_faults', {'detail': 'VARCHAR(40)'})
     add_missing_columns('lab_workshops', {'campus_id': 'INTEGER'})
     add_missing_columns('users', {'workshop_id': 'INTEGER'})
+    add_missing_columns('activity_logs', {'user_name': 'VARCHAR(120)', 'description': 'VARCHAR(500)'})
+    add_missing_columns('lab_practice_sessions', {'rules_snapshot': 'JSON'})
     add_missing_columns('lab_incidents', {
         'rule_code': 'VARCHAR(40)', 'capture_path': 'VARCHAR(300)',
         'reviewed_by': 'INTEGER', 'reviewed_at': 'DATETIME', 'review_reason': 'VARCHAR(300)',

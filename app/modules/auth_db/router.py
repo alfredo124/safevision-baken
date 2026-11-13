@@ -1,8 +1,11 @@
+from datetime import datetime, timezone
+
 import bcrypt
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
+from app.core.bitacora import MODULOS, registrar
 from app.core.database import SessionLocal
 from app.core.security import create_access_token, verify_password
 from app.modules.auth_db import models, schemas
@@ -88,6 +91,7 @@ def setup_first_admin(payload: schemas.SetupCreate, db: Session = Depends(get_db
     db.add(user)
     db.commit()
     db.refresh(user)
+    registrar(db, user, 'CREAR_ADMIN_INICIAL', 'usuarios', f'Administrador general inicial: {user.username}')
     return _login_payload(db, user)
 
 
@@ -109,9 +113,14 @@ async def login(request: Request, db: Session = Depends(get_db)):
 
     user = db.query(models.User).filter(models.User.username == username).first()
     if not user or not verify_password(password, user.hashed_password):
+        # Intentos fallidos: sirven para ver si alguien prueba contraseñas.
+        registrar(db, None, 'INICIO_SESION_FALLIDO', 'usuarios', f'Usuario intentado: {str(username)[:80]}',
+                  usuario_nombre=str(username)[:120] if username else None)
         raise HTTPException(status_code=401, detail='Credenciales incorrectas')
     if user.is_active is False:
+        registrar(db, user, 'INICIO_SESION_FALLIDO', 'usuarios', 'Usuario desactivado')
         raise HTTPException(status_code=401, detail='Usuario desactivado. Consulta al administrador.')
+    registrar(db, user, 'INICIAR_SESION', 'usuarios')
     return _login_payload(db, user)
 
 
@@ -140,7 +149,10 @@ def create_user(user: schemas.UserCreate, db: Session = Depends(get_db), _admin=
     db.add(db_user)
     db.commit()
     db.refresh(db_user)
-    return _user_response(db, db_user)
+    data = _user_response(db, db_user)
+    registrar(db, _admin, 'CREAR_USUARIO', 'usuarios',
+              f'{db_user.username} ({role.value}' + (f', {data["workshop_name"]})' if data['workshop_name'] else ')'))
+    return data
 
 
 @router.patch('/users/{username}', response_model=schemas.UserResponse)
@@ -168,10 +180,58 @@ def update_user(
     if loses_admin and db_user.is_active is not False and _active_admins(db) <= 1:
         raise HTTPException(status_code=400, detail='Debe quedar al menos un administrador activo')
 
+    # Qué cambió, para la bitácora (sin escribir la contraseña).
+    changed = [field for field, value in changes.items() if getattr(db_user, field) != value]
     for field, value in changes.items():
         setattr(db_user, field, value)
     if password:
         db_user.hashed_password = _hash(password)
+        changed.append('contraseña')
     db.commit()
     db.refresh(db_user)
+    if changed:
+        action = 'DESACTIVAR_USUARIO' if changes.get('is_active') is False and 'is_active' in changed else 'EDITAR_USUARIO'
+        registrar(db, admin, action, 'usuarios', f'{db_user.username}: cambió {", ".join(changed)}')
     return _user_response(db, db_user)
+
+
+# --- Bitácora (solo el administrador general) ---
+
+@router.get('/activity')
+def list_activity(
+    module: str | None = None,
+    start: datetime | None = None,
+    end: datetime | None = None,
+    limit: int = Query(300, ge=1, le=2000),
+    db: Session = Depends(get_db),
+    _admin=Depends(require_admin),
+):
+    """Acciones registradas, las más recientes primero. `start`/`end` con zona horaria."""
+    if module is not None and module not in MODULOS:
+        raise HTTPException(status_code=422, detail='Área de la bitácora desconocida')
+    query = db.query(models.ActivityLog)
+    if module:
+        query = query.filter(models.ActivityLog.module_affected == module)
+    # SQLite guarda las fechas en UTC sin zona: los filtros se comparan igual.
+    if start is not None:
+        query = query.filter(models.ActivityLog.timestamp >= _naive_utc(start))
+    if end is not None:
+        query = query.filter(models.ActivityLog.timestamp < _naive_utc(end))
+    rows = query.order_by(models.ActivityLog.timestamp.desc(), models.ActivityLog.id.desc()).limit(limit).all()
+    return [{
+        'id': row.id,
+        'timestamp': row.timestamp.replace(tzinfo=timezone.utc) if row.timestamp and row.timestamp.tzinfo is None
+        else row.timestamp,
+        'user_id': row.user_id,
+        'user_name': row.user_name,
+        'action': row.action,
+        'module': row.module_affected,
+        'description': row.description,
+        'ip_address': row.ip_address,
+    } for row in rows]
+
+
+def _naive_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value
+    return value.astimezone(timezone.utc).replace(tzinfo=None)

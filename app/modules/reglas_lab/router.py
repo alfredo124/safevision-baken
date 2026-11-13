@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.core.bitacora import registrar
 from app.core.database import SessionLocal
 from app.core.permisos import allowed_camera_ids, allowed_workshop_ids, can_access_workshop, is_admin
 from app.modules.ai_vision.models import Camera
@@ -231,6 +232,9 @@ def create_workshop(
         db.rollback()
         raise HTTPException(status_code=409, detail='Ya existe un taller con ese nombre y área') from error
     db.refresh(workshop)
+    registrar(db, current_user, 'CREAR_LABORATORIO', 'laboratorios',
+              f'{workshop.name} ({workshop.laboratory_type})' + (f', local {_campus_name(db, workshop.campus_id)}'
+                                                                if workshop.campus_id else ''))
     return _workshop_response(db, workshop)
 
 
@@ -311,9 +315,17 @@ def update_workshop_configuration(
         db.rollback()
         raise HTTPException(status_code=409, detail='No se pudo guardar la asignación de cámaras') from error
 
-    # Con la práctica en curso, el análisis sigue la configuración nueva sin reiniciar la práctica.
-    from app.modules.reglas_lab import monitoring
+    # Con la práctica en curso, la sesión guarda la nueva versión de las reglas y el análisis sigue la
+    # configuración nueva sin reiniciar la práctica.
+    from app.modules.reglas_lab import monitoring, sesiones
+    open_session = sesiones.open_session_for(db, workshop_id)
+    if open_session is not None and sesiones.record_rules(db, open_session):
+        db.commit()
     monitoring.sync_workshop(db, workshop_id, previous_camera_ids)
+    registrar(db, current_user, 'CONFIGURAR_LABORATORIO', 'laboratorios',
+              f'{workshop.name}: cámaras {sorted(camera_ids) or "ninguna"}; EPP exigido: '
+              + (', '.join(f'{rule.equipment_id} ({(rule.rule_code or "").strip() or "código del catálogo"})'
+                           for rule in requested_rules.values()) or 'ninguno'))
     db.refresh(workshop)
     return _workshop_response(db, workshop)
 
@@ -334,6 +346,8 @@ def create_equipment(
         db.rollback()
         raise HTTPException(status_code=409, detail='El identificador, nombre o código ya existe') from error
     db.refresh(equipment)
+    registrar(db, current_user, 'CREAR_EPP', 'laboratorios',
+              f'{equipment.name} ({equipment.missing_code}, {equipment.impact})')
     return equipment
 
 
@@ -345,10 +359,18 @@ def list_incidents(
     active_session: bool = False,
     date_from: date | None = None,
     date_to: date | None = None,
+    start: datetime | None = None,
+    end: datetime | None = None,
     incident_status: schemas.IncidentStatus | None = Query(None, alias='status'),
+    limit: int = Query(500, ge=1, le=2000),
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
+    """Incidencias visibles para el usuario, las más recientes primero (como máximo `limit`).
+
+    Periodo: `start`/`end` con zona horaria (la web envía el inicio y el fin del día en su hora local);
+    `date_from`/`date_to` son días en UTC y se mantienen por compatibilidad.
+    """
     query = (
         db.query(models.Incident, models.Workshop.name, Camera.name, models.SafetyEquipment.name, User.full_name)
         .outerjoin(models.Workshop, models.Workshop.id == models.Incident.workshop_id)
@@ -374,10 +396,14 @@ def list_incidents(
         query = query.filter(models.Incident.occurred_at >= datetime.combine(date_from, time.min, timezone.utc))
     if date_to:
         query = query.filter(models.Incident.occurred_at < datetime.combine(date_to, time.max, timezone.utc))
+    if start is not None:
+        query = query.filter(models.Incident.occurred_at >= _naive_utc(start))
+    if end is not None:
+        query = query.filter(models.Incident.occurred_at < _naive_utc(end))
     if incident_status:
         query = query.filter(models.Incident.status == incident_status)
 
-    rows = query.order_by(models.Incident.occurred_at.desc()).limit(500).all()
+    rows = query.order_by(models.Incident.occurred_at.desc()).limit(limit).all()
     faults = _faults_by_incident(db, [row[0] for row in rows])
     codes = _session_codes(db, [row[0] for row in rows])
     return [
@@ -396,10 +422,29 @@ def incident_report(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
-    """Reporte SST del periodo [start, end) con las incidencias reales. La web envía el inicio y el fin
-    del día en su hora local (con zona). El encargado solo obtiene su laboratorio."""
+    """Vista previa del reporte SST del periodo [start, end) con las incidencias reales. La web envía el
+    inicio y el fin del día en su hora local (con zona). El encargado solo obtiene su laboratorio.
+    No queda guardado: para entregarlo se emite con POST /reports."""
     from app.modules.reglas_lab.reporte import build_report
 
+    scope, filters = _report_scope(db, current_user, start, end, workshop_id, campus_id)
+    report = build_report(db, start, end, scope)
+    report['filters'] = filters
+    report['generated_by'] = current_user.full_name or current_user.username
+    return report
+
+
+def _naive_utc(value: datetime) -> datetime:
+    """SQLite guarda las fechas en UTC sin zona; los filtros se comparan igual."""
+    if value.tzinfo is None:
+        return value
+    return value.astimezone(timezone.utc).replace(tzinfo=None)
+
+
+def _report_scope(db: Session, current_user, start: datetime, end: datetime,
+                  workshop_id: int | None, campus_id: int | None) -> tuple[set[int] | None, dict]:
+    """Valida el periodo y calcula los laboratorios del reporte (None = todos) y los filtros con sus
+    nombres. El encargado solo obtiene su laboratorio."""
     if start.tzinfo is None or end.tzinfo is None:
         raise HTTPException(status_code=422, detail='Las fechas deben incluir la zona horaria')
     if end <= start:
@@ -424,15 +469,92 @@ def incident_report(
         _ensure_workshop_access(workshop, current_user)
         scope = {workshop_id} if scope is None else scope & {workshop_id}
 
-    report = build_report(db, start, end, scope)
-    report['filters'] = {
+    return scope, {
         'workshop_id': workshop_id,
         'workshop_name': workshop.name if workshop else None,
         'campus_id': campus_id,
         'campus_name': campus.name if campus else None,
     }
-    report['generated_by'] = current_user.full_name or current_user.username
-    return report
+
+
+# --- Reportes emitidos: quedan guardados con su huella para poder verificarlos después ---
+
+def _issued_summary(row: models.IssuedReport) -> dict:
+    return {
+        'code': row.code,
+        'start': _as_utc(row.period_start),
+        'end': _as_utc(row.period_end),
+        'filters': row.filters or {},
+        'workshop_ids': row.workshop_ids,
+        'responsible': row.responsible,
+        'fingerprint': row.fingerprint,
+        'summary': row.summary or {},
+        'generated_by': row.generated_by_name,
+        'generated_at': _as_utc(row.generated_at),
+    }
+
+
+def _can_see_report(row: models.IssuedReport, current_user) -> bool:
+    """El administrador ve todos; el encargado, los que solo incluyen su laboratorio."""
+    allowed = allowed_workshop_ids(current_user)
+    return allowed is None or set(row.workshop_ids or []) <= set(allowed)
+
+
+@router.post('/reports', status_code=status.HTTP_201_CREATED)
+def emit_report(payload: schemas.ReportEmit, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
+    """Emite el reporte (al abrir el documento para imprimir o guardar en PDF): se calcula de nuevo, se
+    guarda con su código, responsable y huella, y se devuelve con esos datos."""
+    from app.modules.reglas_lab.reporte import build_report
+
+    scope, filters = _report_scope(db, current_user, payload.start, payload.end, payload.workshop_id,
+                                   payload.campus_id)
+    if scope is None:  # "todos" se guarda como la lista de hoy, para verificarlo igual más adelante
+        scope = {row.id for row in db.query(models.Workshop.id)}
+    report = build_report(db, payload.start, payload.end, scope)
+    now = datetime.now(timezone.utc)
+    issued = models.IssuedReport(
+        code=f'RPT-{now:%Y%m%d-%H%M%S}-{uuid4().hex[:4].upper()}',
+        period_start=payload.start.astimezone(timezone.utc),
+        period_end=payload.end.astimezone(timezone.utc),
+        workshop_ids=sorted(scope),
+        filters=filters,
+        responsible=payload.responsible.strip() or None,
+        fingerprint=report['fingerprint'],
+        summary={key: report['summary'][key] for key in ('alerts', 'confirmed', 'discarded', 'pending', 'sessions')},
+        generated_by=current_user.id,
+        generated_by_name=current_user.full_name or current_user.username,
+        generated_at=now,
+    )
+    db.add(issued)
+    db.commit()
+    registrar(db, current_user, 'EMITIR_REPORTE', 'reportes',
+              f'{issued.code}: {payload.start:%Y-%m-%d} a {payload.end:%Y-%m-%d}, '
+              f'{filters["workshop_name"] or filters["campus_name"] or "todos los laboratorios"}')
+    return {**report, 'report_id': issued.code, 'generated_at': now, 'filters': filters,
+            'generated_by': issued.generated_by_name, 'responsible': issued.responsible, 'issued': True}
+
+
+@router.get('/reports')
+def list_issued_reports(limit: int = Query(50, ge=1, le=500), db: Session = Depends(get_db),
+                        current_user=Depends(get_current_user)):
+    """Reportes emitidos que el usuario puede ver, los más recientes primero."""
+    rows = db.query(models.IssuedReport).order_by(models.IssuedReport.generated_at.desc()).all()
+    return [_issued_summary(row) for row in rows if _can_see_report(row, current_user)][:limit]
+
+
+@router.get('/reports/{code}/verify')
+def verify_issued_report(code: str, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
+    """Recalcula el reporte con el mismo periodo y laboratorios y compara la huella con la emitida.
+    Si no coincide, los datos del periodo cambiaron después de emitirlo (p. ej. se validó una alerta,
+    o el periodo aún no había terminado)."""
+    from app.modules.reglas_lab.reporte import build_report
+
+    row = db.query(models.IssuedReport).filter_by(code=code).first()
+    if row is None or not _can_see_report(row, current_user):
+        raise HTTPException(status_code=404, detail='Reporte no encontrado')
+    current = build_report(db, _as_utc(row.period_start), _as_utc(row.period_end), set(row.workshop_ids or []))
+    return {**_issued_summary(row), 'current_fingerprint': current['fingerprint'],
+            'matches': current['fingerprint'] == row.fingerprint}
 
 
 @router.post('/incidents', response_model=schemas.IncidentResponse, status_code=status.HTTP_201_CREATED)
@@ -478,6 +600,8 @@ def create_incident(
     db.add(incident)
     db.commit()
     db.refresh(incident)
+    registrar(db, current_user, 'CREAR_INCIDENCIA_MANUAL', 'incidencias',
+              f'{incident.code} en {workshop.name}: {incident.title}')
     equipment = db.query(models.SafetyEquipment).filter_by(id=incident.equipment_id).first() if incident.equipment_id else None
     return {
         'id': incident.id,
@@ -503,25 +627,8 @@ def create_incident(
     }
 
 
-@router.patch('/incidents/{incident_id}/status', response_model=schemas.IncidentResponse)
-def update_incident_status(
-    incident_id: int,
-    payload: schemas.IncidentStatusUpdate,
-    db: Session = Depends(get_db),
-    current_user=Depends(get_current_user),
-):
-    incident = db.query(models.Incident).filter_by(id=incident_id).first()
-    if not incident:
-        raise HTTPException(status_code=404, detail='Incidencia no encontrada')
-    workshop = db.query(models.Workshop).filter_by(id=incident.workshop_id).first()
-    _ensure_workshop_access(workshop, current_user)
-    if incident.status in REVIEWED_STATUSES:
-        raise HTTPException(status_code=409, detail='La incidencia ya fue validada')
-    incident.status = payload.status
-    db.commit()
-    return _single_incident_response(db, incident, workshop)
-
-
+# Una alerta solo cambia de estado al validarla (POST /incidents/{id}/review), que guarda quién, cuándo y
+# la acción tomada. Ya no existe una ruta para cambiar el estado sin esos datos.
 REVIEWED_STATUSES = {'CONFIRMADA', 'DESCARTADA'}
 
 
@@ -569,6 +676,12 @@ def review_incident(
             delete_capture(incident.capture_path)
             incident.capture_path = None
     db.commit()
+    if payload.decision == 'CONFIRMADA':
+        registrar(db, current_user, 'CONFIRMAR_ALERTA', 'incidencias',
+                  f'{incident.code} ({incident.title}): {payload.action}')
+    else:
+        registrar(db, current_user, 'DESCARTAR_ALERTA', 'incidencias',
+                  f'{incident.code} ({incident.title})' + (f': {incident.review_reason}' if incident.review_reason else ''))
     return _single_incident_response(db, incident, workshop)
 
 # --------------------------------------------------------------------- monitoreo
@@ -587,8 +700,11 @@ def start_monitoring(workshop_id: int, db: Session = Depends(get_db), current_us
     Las incidencias anteriores se conservan siempre: lo ocurrido en el laboratorio no se borra."""
     from app.modules.reglas_lab import monitoring, sesiones
     workshop = _workshop_for_monitoring(db, workshop_id, current_user)
+    already_open = sesiones.open_session_for(db, workshop_id) is not None
     session = sesiones.start_session(db, workshop, current_user.id)  # antes del análisis: las alertas ya la usan
     cameras = monitoring.start_workshop(db, workshop_id)
+    if not already_open:
+        registrar(db, current_user, 'INICIAR_PRACTICA', 'practicas', f'{session.code} en {workshop.name}')
     return {'workshop_id': workshop_id, 'cameras': cameras,
             'session': _session_payload(db, session)}
 
@@ -596,9 +712,11 @@ def start_monitoring(workshop_id: int, db: Session = Depends(get_db), current_us
 @router.post('/workshops/{workshop_id}/monitoring/stop')
 def stop_monitoring(workshop_id: int, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
     from app.modules.reglas_lab import monitoring, sesiones
-    _workshop_for_monitoring(db, workshop_id, current_user)
+    workshop = _workshop_for_monitoring(db, workshop_id, current_user)
     cameras = monitoring.stop_workshop(db, workshop_id)
     session = sesiones.end_session(db, workshop_id, current_user.id)
+    if session is not None:
+        registrar(db, current_user, 'FINALIZAR_PRACTICA', 'practicas', f'{session.code} en {workshop.name}')
     return {'workshop_id': workshop_id, 'cameras': cameras,
             'session': _session_payload(db, session) if session else None}
 
@@ -712,7 +830,7 @@ def list_campuses(db: Session = Depends(get_db), _user=Depends(get_current_user)
 
 
 @router.post('/campuses', response_model=schemas.CampusResponse, status_code=status.HTTP_201_CREATED)
-def create_campus(payload: schemas.CampusCreate, db: Session = Depends(get_db), _admin=Depends(require_admin)):
+def create_campus(payload: schemas.CampusCreate, db: Session = Depends(get_db), admin=Depends(require_admin)):
     campus = models.Campus(name=payload.name.strip(), city=payload.city, address=payload.address)
     db.add(campus)
     try:
@@ -721,16 +839,18 @@ def create_campus(payload: schemas.CampusCreate, db: Session = Depends(get_db), 
         db.rollback()
         raise HTTPException(status_code=409, detail='Ya existe un local con ese nombre') from error
     db.refresh(campus)
+    registrar(db, admin, 'CREAR_LOCAL', 'locales', campus.name)
     return _campus_response(db, campus)
 
 
 @router.patch('/campuses/{campus_id}', response_model=schemas.CampusResponse)
 def update_campus(campus_id: int, payload: schemas.CampusUpdate, db: Session = Depends(get_db),
-                  _admin=Depends(require_admin)):
+                  admin=Depends(require_admin)):
     campus = db.get(models.Campus, campus_id)
     if campus is None:
         raise HTTPException(status_code=404, detail='Local no encontrado')
-    for field, value in payload.model_dump(exclude_unset=True).items():
+    changes = payload.model_dump(exclude_unset=True)
+    for field, value in changes.items():
         setattr(campus, field, value.strip() if isinstance(value, str) else value)
     try:
         db.commit()
@@ -738,12 +858,14 @@ def update_campus(campus_id: int, payload: schemas.CampusUpdate, db: Session = D
         db.rollback()
         raise HTTPException(status_code=409, detail='Ya existe un local con ese nombre') from error
     db.refresh(campus)
+    registrar(db, admin, 'DESACTIVAR_LOCAL' if changes.get('is_active') is False else 'EDITAR_LOCAL', 'locales',
+              f'{campus.name}: cambió {", ".join(changes) or "nada"}')
     return _campus_response(db, campus)
 
 
 @router.patch('/workshops/{workshop_id}', response_model=schemas.WorkshopResponse)
 def update_workshop(workshop_id: int, payload: schemas.WorkshopUpdate, db: Session = Depends(get_db),
-                    _admin=Depends(require_admin)):
+                    admin=Depends(require_admin)):
     workshop = db.get(models.Workshop, workshop_id)
     if workshop is None or not workshop.is_active:
         raise HTTPException(status_code=404, detail='Taller no encontrado')
@@ -758,4 +880,5 @@ def update_workshop(workshop_id: int, payload: schemas.WorkshopUpdate, db: Sessi
         db.rollback()
         raise HTTPException(status_code=409, detail='Ya existe un taller con ese nombre y área') from error
     db.refresh(workshop)
+    registrar(db, admin, 'EDITAR_LABORATORIO', 'laboratorios', f'{workshop.name}: cambió {", ".join(changes) or "nada"}')
     return _workshop_response(db, workshop)

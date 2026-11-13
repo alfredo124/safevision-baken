@@ -7,9 +7,9 @@ from pydantic import BaseModel, ConfigDict, Field
 LaboratoryType = Literal['QUIMICA', 'FISICA']
 Severity = Literal['CRÍTICO', 'ALTO', 'MEDIO']
 # PENDIENTE = alerta sin revisar. CONFIRMADA / DESCARTADA las fija el encargado o el
-# administrador (Tarea 2A). EN_REVISION y ATENDIDO se conservan por datos anteriores.
+# administrador (Tarea 2A). EN_REVISION y ATENDIDO se conservan solo para leer datos anteriores:
+# ya no hay forma de asignarlos.
 IncidentStatus = Literal['PENDIENTE', 'EN_REVISION', 'CONFIRMADA', 'DESCARTADA', 'ATENDIDO']
-ManualStatus = Literal['PENDIENTE', 'EN_REVISION', 'ATENDIDO']
 ReviewDecision = Literal['CONFIRMADA', 'DESCARTADA']
 ReviewAction = Literal['CORREGIDO', 'RETIRADO_DE_PRACTICA']
 
@@ -132,8 +132,13 @@ class IncidentCreate(BaseModel):
     occurred_at: datetime | None = None
 
 
-class IncidentStatusUpdate(BaseModel):
-    status: ManualStatus
+class ReportEmit(BaseModel):
+    """Emitir un reporte: mismo periodo y filtros que la vista previa, más el responsable SST."""
+    start: datetime
+    end: datetime
+    workshop_id: int | None = None
+    campus_id: int | None = None
+    responsible: str = Field(default='', max_length=160)
 
 
 class IncidentReview(BaseModel):

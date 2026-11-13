@@ -30,8 +30,13 @@ app.add_middleware(
 from app.core import events
 
 
+from app.core import bitacora
+
+
 @app.middleware("http")
 async def notify_changes(request: Request, call_next):
+    # IP del equipo que hace la petición, para la bitácora (app/core/bitacora.py).
+    bitacora.ip_actual.set(request.client.host if request.client else None)
     response = await call_next(request)
     topics = events.topics_for_request(request.method, request.url.path, response.status_code)
     if topics:

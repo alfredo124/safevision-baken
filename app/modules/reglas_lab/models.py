@@ -92,6 +92,11 @@ class PracticeSession(Base):
     # FINALIZADA: la cerró un usuario. INTERRUMPIDA: el servidor se apagó con la práctica en curso
     # (ended_at es entonces la última actividad conocida, no la hora exacta).
     end_reason = Column(String(20), nullable=True)
+    # Reglas de EPP que se exigieron en esta práctica. La configuración del laboratorio se reemplaza al
+    # guardarla, así que aquí queda la copia: [{"since": ISO, "rules": [{equipment_id, name, rule_code,
+    # severity, manual_verification}]}]. Hay una versión nueva por cada cambio hecho con la práctica en
+    # curso. None en prácticas anteriores a este registro.
+    rules_snapshot = Column(JSON, nullable=True)
 
 
 class Incident(Base):
@@ -129,6 +134,31 @@ class Incident(Base):
     # Práctica en la que ocurrió. None en incidencias anteriores a las sesiones o fuera de una práctica.
     session_id = Column(Integer, ForeignKey('lab_practice_sessions.id'), nullable=True, index=True)
     created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+
+class IssuedReport(Base):
+    """Reporte SST emitido (al abrir el documento para imprimir o guardar en PDF).
+
+    Guarda el periodo, los laboratorios incluidos y la huella SHA-256 del contenido. Con eso se puede
+    comprobar más adelante que un PDF entregado corresponde a los datos: se recalcula el reporte con el
+    mismo periodo y alcance y se compara la huella.
+    """
+    __tablename__ = 'lab_reports'
+
+    id = Column(Integer, primary_key=True, index=True)
+    code = Column(String(40), nullable=False, unique=True, index=True)
+    period_start = Column(DateTime(timezone=True), nullable=False)
+    period_end = Column(DateTime(timezone=True), nullable=False)
+    # Laboratorios incluidos al emitir (lista explícita: "todos" de hoy no es "todos" de mañana).
+    workshop_ids = Column(JSON, nullable=False)
+    # Filtros elegidos en la pantalla, con sus nombres de ese momento.
+    filters = Column(JSON, nullable=True)
+    responsible = Column(String(160), nullable=True)  # "Responsable SST" que figura en el documento
+    fingerprint = Column(String(64), nullable=False, index=True)
+    summary = Column(JSON, nullable=True)  # totales del reporte, para listar sin recalcular
+    generated_by = Column(Integer, ForeignKey('users.id'), nullable=True)
+    generated_by_name = Column(String(120), nullable=True)
+    generated_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc), index=True)
 
 
 class IncidentFault(Base):
