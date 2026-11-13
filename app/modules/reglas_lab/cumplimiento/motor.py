@@ -6,6 +6,27 @@ que se puede probar en segundos con detecciones grabadas o simuladas.
 
 Principio clave: "no vi el EPP" no significa "no lleva el EPP". Un fallo aislado
 del modelo o una zona del cuerpo no visible no deben generar una alerta.
+
+Cómo leer este archivo (recorrido de un cuadro de video):
+
+1. Entrada: FrameObservation con las personas (caja, puntos clave de pose, color del torso) y el
+   EPP detectado (caja, clase, confianza) en ese cuadro. Lo arma ai_vision/detectors.py.
+2. ComplianceEngine.update() decide, para cada persona y cada regla, una MUESTRA (_Sample):
+   PRESENT (lleva el EPP), ABSENT (la zona se ve y no lo lleva), PARTIAL (lo lleva mal puesto)
+   o UNKNOWN (no se ve la zona: no cuenta ni a favor ni en contra).
+     - Con pose (lo normal): _pose_samples() mira si el EPP está sobre la parte del cuerpo
+       (muñecas para guantes, cara para lentes, torso para la bata).
+     - Sin pose: _assign_equipment() reparte el EPP por zonas de la caja de la persona.
+3. _advance() guarda la muestra en una VENTANA de tiempo (window_seconds) y calcula qué
+   proporción de muestras verificadas tenía el EPP. Solo con suficientes muestras y tiempo
+   verificado cambia el ESTADO: INCUMPLE si casi nunca lo tenía, CUMPLE si lo tenía a menudo;
+   en medio conserva el estado anterior (histéresis, para no parpadear).
+4. _maybe_emit() convierte un INCUMPLE nuevo en un ViolationEvent (la alerta), una sola vez por
+   persona y EPP, y sin repetir la de la misma persona si el seguimiento le cambió el número.
+5. Salida: ComplianceResult con el estado de cada persona/EPP (para dibujar en el video) y los
+   eventos nuevos (que incidencias/servicio.py guarda como alertas).
+
+Hay un motor por cámara: guarda la historia reciente de cada persona que aparece en ella.
 """
 from __future__ import annotations
 
@@ -16,6 +37,7 @@ from typing import Iterable, Mapping, Sequence
 
 Box = tuple[float, float, float, float]  # x1, y1, x2, y2 en píxeles
 
+# Zona del cuerpo donde va cada EPP (campo "slot" del catálogo). Decide qué parte se mira.
 SLOT_HEAD = {'ojos', 'cabeza'}
 SLOT_HANDS = {'manos'}
 SLOT_BODY = {'cuerpo'}
@@ -33,6 +55,7 @@ HIP_KEYPOINTS = (KP_LEFT_HIP, KP_RIGHT_HIP)
 
 
 class ComplianceState(str, Enum):
+    """Estado de una persona respecto a un EPP. El valor (en español) es el que ve la web."""
     COMPLIANT = 'CUMPLE'
     VIOLATION = 'INCUMPLE'
     NOT_VERIFIABLE = 'NO_VERIFICABLE'
@@ -41,6 +64,7 @@ class ComplianceState(str, Enum):
 
 
 class _Sample(Enum):
+    """Lo observado en UN cuadro para una persona y un EPP (paso 2 del recorrido)."""
     PRESENT = 'present'
     ABSENT = 'absent'
     UNKNOWN = 'unknown'
@@ -66,6 +90,7 @@ class EquipmentRule:
 
 @dataclass(frozen=True)
 class EquipmentDetection:
+    """Un EPP visto por el modelo (best.pt) en el cuadro. `name` es la clase: gloves, goggles, lab_coat..."""
     name: str
     box: Box
     confidence: float
@@ -73,6 +98,7 @@ class EquipmentDetection:
 
 @dataclass(frozen=True)
 class PersonDetection:
+    """Una persona en el cuadro. `track_id` la sigue entre cuadros (lo asigna el seguimiento del detector)."""
     track_id: int
     box: Box
     confidence: float = 1.0
@@ -89,6 +115,7 @@ class PersonDetection:
 
 @dataclass(frozen=True)
 class FrameObservation:
+    """Todo lo detectado en un cuadro de una cámara: la entrada del motor."""
     timestamp: float  # segundos, monótono dentro de cada cámara
     persons: Sequence[PersonDetection]
     equipment: Sequence[EquipmentDetection]
@@ -97,6 +124,21 @@ class FrameObservation:
 
 @dataclass(frozen=True)
 class ComplianceConfig:
+    """Umbrales del motor. Grupos:
+
+    - Tiempo (window_seconds, min_verified_*, cooldown_seconds, track_ttl_seconds): cuánto hay que
+      observar antes de decidir y cuánto se recuerda a una persona o una alerta.
+    - Proporciones (violation_max_present_ratio, compliant_min_present_ratio): qué parte de las
+      muestras con EPP cuenta como incumple o cumple.
+    - Detección (min_person_confidence, min_equipment_confidence, min_person_height_px, edge_margin_px):
+      qué detecciones se tienen en cuenta.
+    - Pose (min_keypoint_confidence, *_distance): qué tan cerca debe estar el EPP de la muñeca o la cara.
+    - Bata (coat_*, min_coat_torso_coverage): cobertura y color del torso para cerrada/abierta/ausente.
+    - Mal puesto (misplaced_*, goggles_misplaced_max_distance): cuándo una falta es leve.
+
+    Junto a cada valor está la fecha y la medición con que se calibró.
+    """
+    # --- Tiempo ---
     # Periodo provisional decidido con el usuario (2026-11-05): 10 s de ventana y 8 s
     # verificados, probado solo con videos editados de YouTube. Recalibrar con el
     # video propio de cámara fija.
@@ -108,15 +150,18 @@ class ComplianceConfig:
     # Con varias cámaras en CPU cada una se analiza ~0.3 veces/s: 3 muestras en la ventana
     # es lo que se consigue en 10 s. Más muestras impedirían alertar.
     min_verified_samples: int = 3
-    violation_max_present_ratio: float = 0.1
-    compliant_min_present_ratio: float = 0.5
+    # --- Proporciones: muestras con el EPP / muestras verificadas en la ventana ---
+    violation_max_present_ratio: float = 0.1  # hasta 10 % con EPP -> INCUMPLE
+    compliant_min_present_ratio: float = 0.5  # desde 50 % con EPP -> CUMPLE (entre ambos: sin cambio)
+    # --- Detección ---
     min_person_confidence: float = 0.4
     min_equipment_confidence: float = 0.25
-    min_person_height_px: float = 80.0
-    edge_margin_px: float = 2.0
-    track_ttl_seconds: float = 3.0
-    cooldown_seconds: float = 60.0
-    same_person_iou: float = 0.3
+    min_person_height_px: float = 80.0  # personas más pequeñas (lejos) no se evalúan
+    edge_margin_px: float = 2.0  # caja pegada al borde: la zona puede estar fuera del cuadro
+    # --- Memoria ---
+    track_ttl_seconds: float = 3.0  # una persona no vista en este tiempo se olvida
+    cooldown_seconds: float = 60.0  # no repetir la alerta del mismo EPP para la misma persona
+    same_person_iou: float = 0.3  # cajas que se solapan tanto se consideran la misma persona
     # Con pose. Distancias relativas a la altura de la persona. Calibrar con videos.
     min_keypoint_confidence: float = 0.5
     glove_max_wrist_distance: float = 0.08
@@ -164,6 +209,7 @@ class ComplianceConfig:
 
 @dataclass(frozen=True)
 class ViolationEvent:
+    """Falta confirmada (la alerta). incidencias/servicio.py la guarda en la base."""
     track_id: int
     equipment_id: str
     model_class: str
@@ -179,6 +225,7 @@ class ViolationEvent:
 
 @dataclass(frozen=True)
 class PersonEquipmentStatus:
+    """Estado de una persona para un EPP en este cuadro: lo que la web dibuja sobre el video."""
     track_id: int
     equipment_id: str
     state: ComplianceState
@@ -191,6 +238,7 @@ class PersonEquipmentStatus:
 
 @dataclass(frozen=True)
 class ComplianceResult:
+    """Salida de update(): estados de todas las personas/EPP y las alertas nuevas de este cuadro."""
     timestamp: float
     statuses: tuple[PersonEquipmentStatus, ...]
     events: tuple[ViolationEvent, ...]
@@ -198,22 +246,28 @@ class ComplianceResult:
 
 @dataclass
 class _RuleTrack:
-    samples: deque[tuple[float, _Sample]] = field(default_factory=deque)
-    state: ComplianceState = ComplianceState.NOT_VERIFIABLE
-    violation_started_at: float | None = None
-    alerted: bool = False
+    """Memoria del motor para UNA persona y UN EPP."""
+    samples: deque[tuple[float, _Sample]] = field(default_factory=deque)  # (instante, muestra) en la ventana
+    state: ComplianceState = ComplianceState.NOT_VERIFIABLE  # decisión vigente (con histéresis)
+    violation_started_at: float | None = None  # cuándo pasó a INCUMPLE
+    alerted: bool = False  # ya se emitió la alerta de este INCUMPLE
     alert_detail: str | None = None  # detalle de la última alerta emitida
-    verified_span: float = 0.0
-    verified_count: int = 0
+    verified_span: float = 0.0  # segundos entre la primera y la última muestra verificada
+    verified_count: int = 0  # muestras verificadas (no UNKNOWN) en la ventana
 
 
 @dataclass
 class _PersonTrack:
+    """Memoria de una persona: cuándo se la vio por última vez y su _RuleTrack por EPP."""
     last_seen: float
     rules: dict[str, _RuleTrack] = field(default_factory=dict)
 
 
+# --- Geometría: cajas, puntos clave y distancias ---------------------------------------------
+
+
 def _iou(a: Box, b: Box) -> float:
+    """Intersección sobre unión de dos cajas: 0 = no se tocan, 1 = idénticas."""
     width = max(0.0, min(a[2], b[2]) - max(a[0], b[0]))
     height = max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
     intersection = width * height
@@ -228,7 +282,12 @@ def _center(box: Box) -> tuple[float, float]:
 
 
 def _association_cost(item: Box, person: Box, slot: str) -> float | None:
-    """Coste de asignar un EPP a una persona, o None si no es compatible."""
+    """Coste de asignar un EPP a una persona, o None si no es compatible (solo sin pose).
+
+    Cada zona define una franja de la caja de la persona donde puede estar el EPP y un punto
+    "ancla" (p. ej. la altura de los ojos para los lentes). El coste es la distancia del centro
+    del EPP a ese ancla, relativa a la altura de la persona: menor coste = más probable que sea suyo.
+    """
     px1, py1, px2, py2 = person
     width, height = px2 - px1, py2 - py1
     if width <= 0 or height <= 0:
@@ -263,6 +322,7 @@ def _point_box_distance(point: tuple[float, float], box: Box) -> float:
 
 
 def _visible_points(person: PersonDetection, indices: Sequence[int], min_conf: float) -> dict[int, tuple[float, float]]:
+    """Puntos clave pedidos que el modelo de pose ve con confianza suficiente: {índice: (x, y)}."""
     keypoints = person.keypoints or ()
     return {
         index: (keypoints[index][0], keypoints[index][1])
@@ -312,8 +372,15 @@ def _coverage(inner: Box, outer: Box) -> float:
     return width * height / area if area > 0 else 0.0
 
 
+# --- Motor ------------------------------------------------------------------------------------
+
 class ComplianceEngine:
-    """Mantiene el estado de una cámara. Crear una instancia por cámara."""
+    """Mantiene el estado de una cámara. Crear una instancia por cámara.
+
+    Uso: engine = ComplianceEngine(reglas); en cada cuadro, result = engine.update(observacion).
+    Las reglas sin `model_class` (botas, vestimenta) no se pueden comprobar con el modelo: se
+    muestran como NO_VERIFICABLE y nunca generan alertas (verificación manual del encargado).
+    """
 
     def __init__(self, rules: Iterable[EquipmentRule], config: ComplianceConfig | None = None):
         all_rules = list(rules)
@@ -321,16 +388,19 @@ class ComplianceEngine:
         self.rules = [rule for rule in all_rules if rule.model_class]
         # El modelo no puede comprobarlas: nunca generan una infracción.
         self.unsupported_rules = [rule for rule in all_rules if not rule.model_class]
-        self._people: dict[int, _PersonTrack] = {}
+        self._people: dict[int, _PersonTrack] = {}  # track_id -> memoria de la persona
+        # Alertas recientes por EPP: (instante, track_id, caja). Evita repetir la alerta de una persona.
         self._recent_events: dict[str, list[tuple[float, int, Box]]] = {}
         self._last_timestamp: float | None = None
 
     def update(self, frame: FrameObservation) -> ComplianceResult:
+        """Procesa un cuadro: muestra por persona y regla -> ventana -> estado -> posible alerta."""
         if self._last_timestamp is not None and frame.timestamp < self._last_timestamp:
             raise ValueError('Los timestamps de una cámara no pueden retroceder')
         self._last_timestamp = frame.timestamp
         config = self.config
 
+        # Paso 2: muestras del cuadro. Las personas con pose y sin pose se evalúan por separado.
         persons = [p for p in frame.persons if p.confidence >= config.min_person_confidence]
         present = self._assign_equipment([p for p in persons if p.keypoints is None], frame.equipment)
         pose_samples = self._pose_samples([p for p in persons if p.keypoints is not None], frame.equipment)
@@ -350,7 +420,7 @@ class ComplianceEngine:
                     sample = _Sample.PRESENT
                 else:
                     sample = _Sample.ABSENT
-                ratio = self._advance(rule_track, frame.timestamp, sample)
+                ratio = self._advance(rule_track, frame.timestamp, sample)  # paso 3: ventana y estado
                 display, progress = self._display_state(rule_track, ratio)
                 severity = detail = None
                 if display is ComplianceState.VIOLATION:
@@ -359,7 +429,7 @@ class ComplianceEngine:
                 statuses.append(PersonEquipmentStatus(
                     person.track_id, rule.equipment_id, display, ratio, progress, severity, detail,
                 ))
-                event = self._maybe_emit(person, rule, rule_track, frame.timestamp, ratio)
+                event = self._maybe_emit(person, rule, rule_track, frame.timestamp, ratio)  # paso 4: alerta
                 if event:
                     events.append(event)
             for rule in self.unsupported_rules:
@@ -373,6 +443,7 @@ class ComplianceEngine:
     def _assign_equipment(
         self, persons: Sequence[PersonDetection], equipment: Sequence[EquipmentDetection],
     ) -> set[tuple[int, str]]:
+        """Sin pose: pares (persona, EPP) en que el EPP detectado cae en la zona de esa persona."""
         present: set[tuple[int, str]] = set()
         for rule in self.rules:
             for item in equipment:
@@ -421,6 +492,12 @@ class ComplianceEngine:
 
         Guantes: cada muñeca visible se evalúa por separado; basta una muñeca
         visible sin guante para que la muestra sea AUSENTE.
+
+        Para cada regla:
+        1. `parts`: partes visibles de cada persona (muñecas, cara o torso).
+        2. Cada EPP detectado se asigna a la persona con la parte más cercana: va a `covered`
+           (bien puesto) o a `partial` (bata abierta, lentes fuera de los ojos).
+        3. La muestra sale de comparar las partes visibles con las cubiertas.
         """
         config = self.config
         heights = {p.track_id: max(1.0, p.box[3] - p.box[1]) for p in persons}
@@ -472,6 +549,7 @@ class ComplianceEngine:
                                              else item.confidence >= config.coat_closed_min_confidence)
                     (covered if closed else partial)[best[1]] |= best[2]
 
+            # Muestra de cada persona para esta regla.
             for track_id, person_parts in parts.items():
                 if not person_parts:
                     sample = _Sample.UNKNOWN
@@ -491,6 +569,7 @@ class ComplianceEngine:
         return samples
 
     def _slot_visible(self, person: PersonDetection, slot: str, frame_size: tuple[int, int] | None) -> bool:
+        """Sin pose: si la zona puede estar en el cuadro (persona grande y no cortada por el borde)."""
         x1, y1, x2, _ = person.box
         if person.box[3] - y1 < self.config.min_person_height_px:
             return False
@@ -504,6 +583,11 @@ class ComplianceEngine:
         return True
 
     def _advance(self, track: _RuleTrack, now: float, sample: _Sample) -> float | None:
+        """Añade la muestra, descarta las que salen de la ventana y actualiza el estado.
+
+        Devuelve la proporción de muestras verificadas con el EPP bien puesto (None si no hay
+        ninguna verificada). PARTIAL cuenta como "no presente" para esta proporción.
+        """
         config = self.config
         track.samples.append((now, sample))
         while track.samples and now - track.samples[0][0] > config.window_seconds:
@@ -549,6 +633,7 @@ class ComplianceEngine:
 
     @staticmethod
     def _set_state(track: _RuleTrack, state: ComplianceState, now: float) -> None:
+        """Cambia el estado; al entrar en INCUMPLE se anota el inicio y se permite una alerta nueva."""
         if state is track.state:
             return
         track.state = state
@@ -561,6 +646,12 @@ class ComplianceEngine:
     def _maybe_emit(
         self, person: PersonDetection, rule: EquipmentRule, track: _RuleTrack, now: float, ratio: float | None,
     ) -> ViolationEvent | None:
+        """Alerta para un INCUMPLE todavía no avisado, o None.
+
+        No se avisa dos veces el mismo INCUMPLE, salvo que pase de leve a grave. Tampoco se avisa
+        si en `cooldown_seconds` ya hubo una alerta de ese EPP para el mismo track_id o para una
+        caja casi igual (el seguimiento a veces cambia el número de una persona).
+        """
         if track.state is not ComplianceState.VIOLATION:
             return None
         detail = self._violation_detail(track, rule)
@@ -606,6 +697,7 @@ class ComplianceEngine:
         return DETAIL_COAT_OPEN if rule.slot in SLOT_BODY else DETAIL_GOGGLES_OFF if rule.slot in SLOT_HEAD else None
 
     def _forget_stale(self, now: float) -> None:
+        """Olvida a las personas que no aparecen desde hace `track_ttl_seconds`."""
         stale = [
             track_id for track_id, track in self._people.items()
             if now - track.last_seen > self.config.track_ttl_seconds
@@ -613,6 +705,8 @@ class ComplianceEngine:
         for track_id in stale:
             del self._people[track_id]
 
+
+# --- Grabaciones -----------------------------------------------------------------------------
 
 def observation_from_record(record: Mapping) -> FrameObservation:
     """Crea una observación a partir de una línea JSON de tools/record_detections.py."""

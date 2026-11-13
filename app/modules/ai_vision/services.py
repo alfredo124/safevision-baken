@@ -4,6 +4,28 @@ Una sola captura y un solo análisis por cámara, sin importar cuántos clientes
 El monitoreo (start_monitoring) es una suscripción del sistema: mantiene la cámara
 abierta y analizando aunque nadie tenga abierta la página de Monitoreo.
 Los frames solo viven en memoria; nunca se escriben en disco desde aquí.
+
+Cómo funciona (una cámara = un CameraStream con dos hilos):
+
+- Hilo de CAPTURA (_capture_loop): lee frames de la fuente (webcam, RTSP, archivo o estación del
+  navegador) lo más rápido que da la fuente, guarda el último en `latest_frame` y, si alguien mira,
+  lo comprime a JPEG para el video. Si la fuente se corta, intenta reconectar (_reconnect).
+- Hilo de ANÁLISIS (_inference_loop): solo trabaja durante una práctica (`monitor` no es None).
+  Toma el último frame, lo pasa por los detectores (pose + EPP) y por el motor de cumplimiento,
+  y guarda el resultado (`overlay`) que la web dibuja sobre el video. Las alertas nuevas se
+  entregan a `on_event` (reglas_lab/practicas/monitoreo.py las guarda como incidencias).
+  Varias cámaras comparten la CPU por turnos (turnos.py).
+
+Suscripciones (quién mantiene abierta la cámara; cuando no queda ninguna, se cierra):
+    "<uuid>"          espectador normal (miniatura o video)
+    "focus-<uuid>"    cámara vista en grande: prioridad en los turnos de análisis
+    "monitor-<uuid>"  la práctica en curso (el sistema, no una persona)
+    reserva de miniatura: un espectador que caduca a los SNAPSHOT_LEASE_SECONDS sin pedir imágenes
+
+Sincronización: el análisis tarda; para que los recuadros coincidan con lo que se ve, durante la
+práctica el video se publica con un retraso (`sync_delay`) igual a lo que tarda el análisis, y
+latest_overlay() devuelve el resultado que corresponde a ese frame retrasado. El modo "en vivo"
+(live=True) muestra el video sin retraso, con los recuadros algo atrasados.
 """
 import logging
 import threading
@@ -20,7 +42,11 @@ from app.modules.reglas_lab.cumplimiento.motor import ComplianceConfig, Complian
 
 logger = logging.getLogger(__name__)
 
+
+# --- Ajustes por variables de entorno (ver iniciar.bat) ---------------------------------------
+
 def _max_fps_from_env() -> float:
+    """Análisis por segundo y cámara fijado a mano (SAFEVISION_MAX_FPS, 2 por defecto)."""
     import os
     try:
         return max(0.5, float(os.environ.get('SAFEVISION_MAX_FPS', '2')))
@@ -46,6 +72,7 @@ MAX_PROCESSING_FPS = _max_fps_from_env()
 
 
 def max_processing_fps() -> float:
+    """Límite vigente de análisis por segundo y cámara: el manual si existe, si no el medido."""
     import os
     from app.modules.ai_vision import performance
     if os.environ.get('SAFEVISION_MAX_FPS'):
@@ -54,6 +81,7 @@ def max_processing_fps() -> float:
 
 
 def performance_summary() -> dict:
+    """Datos de rendimiento para GET /modules/ai_vision/rendimiento."""
     import os
     from app.modules.ai_vision import performance
     return {**performance.profile(), 'max_fps': max_processing_fps(),
@@ -92,13 +120,14 @@ EventHandler = Callable[[int, object, object, object], None]
 
 @dataclass
 class MonitorState:
-    engine: ComplianceEngine
+    """Análisis de una cámara durante la práctica. Existe solo mientras la práctica está en curso."""
+    engine: ComplianceEngine  # motor de cumplimiento de esta cámara (con las reglas del laboratorio)
     pipeline: object  # DetectorPipeline o un sustituto en pruebas
-    on_event: EventHandler
+    on_event: EventHandler  # recibe cada alerta nueva para guardarla
     workshop_id: int | None = None
     started_at: float = field(default_factory=time.time)
-    analyses: int = 0
-    events: int = 0
+    analyses: int = 0  # cuadros analizados
+    events: int = 0  # alertas emitidas
     last_result: object | None = None
     last_analysis_at: float | None = None
     gaps: deque = field(default_factory=lambda: deque(maxlen=30))  # segundos entre análisis
@@ -106,32 +135,44 @@ class MonitorState:
 
 @dataclass
 class CameraStream:
+    """Una cámara abierta: su fuente, sus dos hilos y lo último capturado y analizado.
+
+    `condition` protege todos los campos que comparten los hilos y avisa a quien espera un frame
+    nuevo. Los números *_sequence suben con cada frame/JPEG nuevo: quien pide el siguiente frame
+    indica el último que vio y espera a que el número suba.
+    """
+    # --- Fuente ---
     camera_id: int
     stream_url: str
-    capture: object
-    is_file: bool
+    capture: object  # cv2.VideoCapture o la captura de una estación del navegador
+    is_file: bool  # un archivo se reproduce a su velocidad y vuelve a empezar al terminar
     source_fps: float
     draw_boxes: bool
     confidence_threshold: float
     processing_fps: float
+    # --- Coordinación entre hilos ---
     condition: threading.Condition = field(default_factory=threading.Condition)
-    stop_event: threading.Event = field(default_factory=threading.Event)
+    stop_event: threading.Event = field(default_factory=threading.Event)  # al activarse, los hilos terminan
+    # --- Último frame capturado (para el análisis) ---
     latest_frame: object | None = None
     latest_frame_ts: float = 0.0
     frame_sequence: int = 0
     processed_frame_sequence: int = 0
-    latest_jpeg: bytes | None = None
+    # --- Video para los espectadores ---
+    latest_jpeg: bytes | None = None  # con el retraso de sincronización
     jpeg_sequence: int = 0
+    # --- Resultado del análisis (lo que se dibuja) ---
     overlay: dict | None = None  # último mensaje del motor (temporal, no se guarda)
-    overlays: deque = field(default_factory=lambda: deque(maxlen=20))
-    due_overlay: dict | None = None
-    sync_delay: float = 0.0
+    overlays: deque = field(default_factory=lambda: deque(maxlen=20))  # recientes, para elegir el sincronizado
+    due_overlay: dict | None = None  # el que corresponde al frame que se está viendo
+    sync_delay: float = 0.0  # segundos de retraso del video durante la práctica
     jpeg_buffer: deque = field(default_factory=deque)  # (ts, jpeg) solo en memoria
     live_jpeg: bytes | None = None  # sin retraso, para el modo "en vivo"
     reconnecting: bool = False
     live_sequence: int = 0
-    subscriptions: set = field(default_factory=set)
-    monitor: MonitorState | None = None
+    # --- Quién la usa ---
+    subscriptions: set = field(default_factory=set)  # identificadores (ver la cabecera del archivo)
+    monitor: MonitorState | None = None  # None = sin práctica: no se analiza
     error: str | None = None
     inference_count: int = 0
     capture_thread: threading.Thread | None = None
@@ -159,6 +200,7 @@ def resolve_source(stream_url: str) -> str:
 
 
 def _open_capture(stream_url: str):
+    """Abre la fuente y devuelve (captura, es_archivo). Un número ("0") es una webcam local."""
     from app.modules.ai_vision.browser_ingest import is_browser_source, open_browser_capture
     if is_browser_source(stream_url):
         return open_browser_capture(stream_url)
@@ -169,6 +211,13 @@ def _open_capture(stream_url: str):
 
 
 class VideoStreamProcessor:
+    """Administra todas las cámaras abiertas del servidor (una instancia: `video_processor`, al final).
+
+    Lo usan las rutas de video y miniaturas (ai_vision/router.py) y la práctica
+    (reglas_lab/practicas/monitoreo.py). En las pruebas se crea con fábricas falsas de captura y de
+    detectores para no abrir cámaras ni cargar modelos.
+    """
+
     def __init__(self, model_path='best.pt', image_size=None, jpeg_quality=75, confidence_floor=0.25,
                  pose_model_path='yolo11n-pose.pt', capture_factory=None, pipeline_factory=None):
         self.model_path = model_path
@@ -199,6 +248,8 @@ class VideoStreamProcessor:
             return self._equipment_detector
 
     def _new_pipeline(self):
+        """Detectores (pose + EPP) para una cámara en práctica. La primera vez mide el equipo y decide
+        cuántas cámaras se analizan a la vez (performance.py)."""
         if self._pipeline_factory:
             return self._pipeline_factory()
         from app.modules.ai_vision import performance
@@ -232,6 +283,7 @@ class VideoStreamProcessor:
 
     @staticmethod
     def effective_fps(processing_fps) -> float:
+        """Análisis por segundo de la cámara, limitado al máximo del equipo (mínimo 0.5)."""
         try:
             value = float(processing_fps)
         except (TypeError, ValueError):
@@ -341,6 +393,7 @@ class VideoStreamProcessor:
             return stream.live_jpeg if live else stream.latest_jpeg
 
     def _ensure_lease_reaper(self):
+        """Arranca (si no corre) el hilo que libera las reservas de miniaturas caducadas."""
         with self.lock:
             if self._lease_thread and self._lease_thread.is_alive():
                 return
@@ -348,6 +401,7 @@ class VideoStreamProcessor:
             self._lease_thread.start()
 
     def _reap_leases(self):
+        """Cada segundo, da de baja las reservas sin uso; termina cuando no queda ninguna."""
         while True:
             time.sleep(1.0)
             now = time.monotonic()
@@ -363,6 +417,7 @@ class VideoStreamProcessor:
                 self.unsubscribe(camera_id, token)
 
     def release_camera(self, camera_id):
+        """Cierra la cámara aunque tenga suscripciones (p. ej. al eliminarla)."""
         with self.lock:
             stream = self.streams.pop(camera_id, None)
             if stream:
@@ -403,6 +458,7 @@ class VideoStreamProcessor:
         return True
 
     def stop_monitoring(self, camera_id) -> bool:
+        """Termina el análisis de la cámara; sigue abierta solo si alguien la está mirando."""
         with self.lock:
             stream = self.streams.get(camera_id)
             if not stream or not stream.monitor:
@@ -416,6 +472,7 @@ class VideoStreamProcessor:
         return True
 
     def monitoring_status(self, camera_id) -> dict | None:
+        """Estado del análisis de la cámara en la práctica (None si no hay práctica en ella)."""
         with self.lock:
             stream = self.streams.get(camera_id)
         if not stream or not stream.monitor:
@@ -461,6 +518,11 @@ class VideoStreamProcessor:
             return (stream.live_jpeg if live else stream.latest_jpeg), [], sequence()
 
     def _capture_loop(self, stream: CameraStream):
+        """Hilo de captura: lee frames, guarda el último y publica el JPEG si alguien mira.
+
+        Un archivo se lee a su velocidad original (frame_interval) y vuelve a empezar al terminar;
+        una cámara en vivo se lee tan rápido como entrega frames.
+        """
         frame_interval = 1 / stream.source_fps if stream.is_file else 0
         next_frame_at = time.monotonic()
         try:
@@ -553,6 +615,9 @@ class VideoStreamProcessor:
                 stream.condition.notify_all()
 
     def _inference_loop(self, stream: CameraStream):
+        """Hilo de análisis: durante la práctica, analiza el último frame como mucho
+        `processing_fps` veces por segundo, esperando su turno entre cámaras (turnos.py).
+        Si el análisis falla, la cámara se detiene y el error queda en `stream.error`."""
         last_frame_sequence = 0
         next_inference_at = 0.0
         interval = 1 / stream.processing_fps
@@ -617,6 +682,7 @@ class VideoStreamProcessor:
 
     def _analyze_for_monitoring(self, stream: CameraStream, monitor: MonitorState, frame,
                                 frame_ts: float | None = None) -> dict:
+        """Un análisis: detectores -> motor -> alertas a on_event -> mensaje para dibujar en la web."""
         frame_ts = frame_ts if frame_ts is not None else time.monotonic()
         # El EPP se detecta con el umbral con que se calibró el motor (min_equipment_confidence, 0.25),
         # no con el de la cámara (0.5 por defecto, pensado para los recuadros de la vista). Con 0.5 se
@@ -681,9 +747,11 @@ class VideoStreamProcessor:
             return stream.due_overlay
 
     def _stop_stream(self, stream: CameraStream):
+        """Pide a los dos hilos que terminen; el de captura libera la fuente al salir."""
         stream.stop_event.set()
         with stream.condition:
             stream.condition.notify_all()
 
 
+# Única instancia del servidor: todas las rutas y la práctica comparten las mismas cámaras abiertas.
 video_processor = VideoStreamProcessor()
