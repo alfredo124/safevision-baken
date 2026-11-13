@@ -1,3 +1,10 @@
+"""Preparación de la base al arrancar el servidor (app/main.py llama a initialize_reglas_lab).
+
+- Crea las tablas que falten y añade las columnas nuevas a bases creadas por versiones anteriores
+  (create_all no modifica tablas existentes).
+- Copia nombres en incidencias antiguas y cierra como INTERRUMPIDA las prácticas que quedaron abiertas.
+- Carga el catálogo de EPP inicial y, solo la primera vez, dos laboratorios de ejemplo.
+"""
 from sqlalchemy.orm import Session
 
 from app.core.database import Base, SessionLocal, add_missing_columns, engine
@@ -54,7 +61,7 @@ def initialize_reglas_lab() -> None:
     with SessionLocal() as db:
         snapshot_incident_names(db)
         # El análisis vive en memoria: una práctica que seguía abierta al apagar el servidor ya no corre.
-        from app.modules.reglas_lab.sesiones import close_interrupted_sessions
+        from app.modules.reglas_lab.practicas.sesiones import close_interrupted_sessions
         close_interrupted_sessions(db)
         # Solo se añaden los equipos que faltan; los existentes no se modifican.
         existing = {row.id for row in db.query(SafetyEquipment.id).all()}

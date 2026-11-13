@@ -13,7 +13,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from app.modules.reglas_lab.compliance import PersonDetection
+from app.modules.reglas_lab.cumplimiento.motor import PersonDetection
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 # SAFEVISION_CAPTURE_DIR permite otra carpeta. Obligatorio al probar con una COPIA de la base:

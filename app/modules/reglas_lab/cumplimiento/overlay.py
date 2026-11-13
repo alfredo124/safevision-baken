@@ -6,7 +6,7 @@ iconos los pone el frontend desde el catálogo). Es temporal: no se guarda.
 """
 from __future__ import annotations
 
-from app.modules.reglas_lab.compliance import ComplianceResult, ComplianceState, EquipmentRule, FrameObservation
+from app.modules.reglas_lab.cumplimiento.motor import ComplianceResult, ComplianceState, EquipmentRule, FrameObservation
 
 COLORS = {
     'INCUMPLE': '#f59e0b',

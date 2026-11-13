@@ -16,7 +16,7 @@ from uuid import uuid4
 
 import cv2
 
-from app.modules.reglas_lab.compliance import ComplianceConfig, ComplianceEngine, EquipmentRule
+from app.modules.reglas_lab.cumplimiento.motor import ComplianceConfig, ComplianceEngine, EquipmentRule
 
 logger = logging.getLogger(__name__)
 
@@ -633,7 +633,7 @@ class VideoStreamProcessor:
             except Exception:
                 # Un fallo al guardar no debe detener el análisis de la cámara.
                 logger.exception('No se pudo registrar la incidencia de la cámara %s.', stream.camera_id)
-        from app.modules.reglas_lab.overlay import build_overlay_message
+        from app.modules.reglas_lab.cumplimiento.overlay import build_overlay_message
         message = build_overlay_message(
             stream.camera_id, monitor.analyses, time.time(), observation, result,
             monitor.engine.rules + monitor.engine.unsupported_rules,

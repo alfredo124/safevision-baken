@@ -11,7 +11,7 @@ from dataclasses import replace
 import numpy as np
 
 from app.modules.ai_vision.detectors import torso_light
-from app.modules.reglas_lab.compliance import (
+from app.modules.reglas_lab.cumplimiento.motor import (
     DETAIL_COAT_OPEN, ComplianceEngine, ComplianceState, EquipmentDetection, PersonDetection, torso_for_color,
 )
 from tests.test_bata_abierta import COAT

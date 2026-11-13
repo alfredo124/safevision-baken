@@ -50,10 +50,10 @@ def link_to_workshop(db: Session, camera: models.Camera, workshop) -> None:
     from app.modules.reglas_lab.models import WorkshopCamera
     db.add(WorkshopCamera(workshop_id=workshop.id, camera_id=camera.id))
     db.commit()
-    from app.modules.reglas_lab import monitoring
-    if monitoring.is_active(workshop.id):
+    from app.modules.reglas_lab.practicas import monitoreo
+    if monitoreo.is_active(workshop.id):
         previous = {row.camera_id for row in db.query(WorkshopCamera.camera_id).filter_by(workshop_id=workshop.id)} - {camera.id}
-        monitoring.sync_workshop(db, workshop.id, previous)
+        monitoreo.sync_workshop(db, workshop.id, previous)
 
 
 @router.post('/cameras', response_model=schemas.CameraResponse)

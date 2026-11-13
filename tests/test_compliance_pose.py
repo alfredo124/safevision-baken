@@ -2,7 +2,7 @@
 import tests  # noqa: F401  Primero: BD y capturas temporales (nunca las reales), se ejecute como se ejecute.
 import unittest
 
-from app.modules.reglas_lab.compliance import (
+from app.modules.reglas_lab.cumplimiento.motor import (
     ComplianceConfig, ComplianceEngine, ComplianceState, EquipmentDetection, FrameObservation, PersonDetection,
     observation_from_record,
 )

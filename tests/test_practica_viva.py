@@ -13,7 +13,8 @@ from app.core.security import create_access_token, get_password_hash
 from app.main import app
 from app.modules.ai_vision.models import Camera
 from app.modules.auth_db.models import User, UserRole
-from app.modules.reglas_lab import models, monitoring
+from app.modules.reglas_lab import models
+from app.modules.reglas_lab.practicas import monitoreo
 from tests.test_monitoring import make_processor, wait_until
 
 BASE = '/modules/reglas_lab/workshops'
@@ -38,7 +39,7 @@ class LivePracticeTest(unittest.TestCase):
 
     def setUp(self):
         self.processor = make_processor()
-        patcher = mock.patch.object(monitoring, 'default_processor', self.processor)
+        patcher = mock.patch.object(monitoreo, 'default_processor', self.processor)
         patcher.start()
         self.addCleanup(patcher.stop)
 

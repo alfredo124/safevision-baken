@@ -22,7 +22,7 @@ from ultralytics import YOLO
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.modules.ai_vision.detectors import torso_light  # noqa: E402
-from app.modules.reglas_lab.compliance import PersonDetection  # noqa: E402
+from app.modules.reglas_lab.cumplimiento.motor import PersonDetection  # noqa: E402
 
 
 def main() -> None:

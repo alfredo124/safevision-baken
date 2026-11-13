@@ -10,7 +10,7 @@ import threading
 from dataclasses import replace
 from pathlib import Path
 
-from app.modules.reglas_lab.compliance import EquipmentDetection, FrameObservation, PersonDetection, torso_for_color
+from app.modules.reglas_lab.cumplimiento.motor import EquipmentDetection, FrameObservation, PersonDetection, torso_for_color
 
 # Píxel "claro": brillo (V de HSV, 0-255) alto y saturación baja, es decir blanco o gris claro.
 LIGHT_MIN_VALUE = 150

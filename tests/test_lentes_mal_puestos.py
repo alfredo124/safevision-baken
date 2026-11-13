@@ -6,7 +6,7 @@ Datos simulados con pose, sin YOLO. Persona de 300 px de alto; la cara está a ~
 import tests  # noqa: F401  Primero: BD y capturas temporales (nunca las reales), se ejecute como se ejecute.
 import unittest
 
-from app.modules.reglas_lab.compliance import (
+from app.modules.reglas_lab.cumplimiento.motor import (
     DETAIL_GOGGLES_OFF, ComplianceEngine, ComplianceState, EquipmentDetection, EquipmentRule,
 )
 from tests.test_compliance import run

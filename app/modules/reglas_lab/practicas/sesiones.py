@@ -1,7 +1,7 @@
 """Sesiones de práctica: lo ocurrido en cada laboratorio queda guardado por práctica.
 
 - "Iniciar práctica" abre una sesión (si ya hay una abierta en ese laboratorio, se sigue usando).
-- Cada incidencia guarda la sesión abierta de su laboratorio (incident_service.record_system_fault).
+- Cada incidencia guarda la sesión abierta de su laboratorio (incidencias/servicio.py, record_system_fault).
 - "Finalizar práctica" la cierra con la hora y el usuario.
 - Cada sesión guarda una copia de las reglas de EPP exigidas (rules_snapshot), y una versión nueva si se
   cambian con la práctica en curso. Así el reporte de un periodo pasado muestra lo que se exigía entonces.
@@ -124,7 +124,7 @@ def close_interrupted_sessions(db: Session) -> int:
 
 def session_stats(db: Session, session_ids: list[int]) -> dict[int, dict]:
     """Alertas de cada sesión por estado."""
-    from app.modules.reglas_lab.reporte import CONFIRMED, DISCARDED, PENDING
+    from app.modules.reglas_lab.reportes.reporte import CONFIRMED, DISCARDED, PENDING
     stats = {sid: {'alerts': 0, 'confirmed': 0, 'discarded': 0, 'pending': 0} for sid in session_ids}
     if not session_ids:
         return stats

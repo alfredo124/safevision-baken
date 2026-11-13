@@ -19,8 +19,9 @@ from app.main import app
 from app.modules.ai_vision.capture import head_region, mask_heads, save_incident_capture
 from app.modules.ai_vision.models import Camera
 from app.modules.ai_vision.services import VideoStreamProcessor
-from app.modules.reglas_lab import models, monitoring
-from app.modules.reglas_lab.compliance import ComplianceConfig, FrameObservation, PersonDetection
+from app.modules.reglas_lab import models
+from app.modules.reglas_lab.practicas import monitoreo
+from app.modules.reglas_lab.cumplimiento.motor import ComplianceConfig, FrameObservation, PersonDetection
 from tests.test_compliance_pose import BOX, skeleton
 
 FAST = ComplianceConfig(window_seconds=1.2, min_verified_seconds=0.9, min_verified_samples=3, cooldown_seconds=600)
@@ -145,7 +146,7 @@ class SubscriptionTest(unittest.TestCase):
 
 
 def models_rule(equipment_id, slot, model_class):
-    from app.modules.reglas_lab.compliance import EquipmentRule
+    from app.modules.reglas_lab.cumplimiento.motor import EquipmentRule
     return EquipmentRule(equipment_id, slot, model_class, 'ALTO', rule_code='RLQ-2.3')
 
 
@@ -208,7 +209,7 @@ class MonitoringFlowTest(unittest.TestCase):
             frame, persons, code, highlight_box, directory=self.capture_dir)
 
         with database.SessionLocal() as db:
-            results = monitoring.start_workshop(db, self.workshop_id, processor=processor, capture_writer=writer)
+            results = monitoreo.start_workshop(db, self.workshop_id, processor=processor, capture_writer=writer)
         self.assertEqual(results[0]['started'], True, results)
 
         def incidents():
@@ -218,7 +219,7 @@ class MonitoringFlowTest(unittest.TestCase):
         self.assertTrue(wait_until(lambda: incidents()), 'No se creó la incidencia')
         time.sleep(1.5)
         with database.SessionLocal() as db:
-            monitoring.stop_workshop(db, self.workshop_id, processor=processor)
+            monitoreo.stop_workshop(db, self.workshop_id, processor=processor)
         found = incidents()
         self.assertEqual(len(found), 1)
         incident = found[0]
@@ -275,7 +276,7 @@ if __name__ == '__main__':
 class IncidentTimezoneTest(unittest.TestCase):
     def test_occurred_at_is_returned_with_utc_offset(self):
         from datetime import datetime, timezone
-        from app.modules.reglas_lab.router import _as_utc
+        from app.modules.reglas_lab.comun import as_utc as _as_utc
         naive = datetime(2026, 11, 5, 13, 0, 0)
         self.assertEqual(_as_utc(naive).tzinfo, timezone.utc)
         self.assertEqual(_as_utc(naive).isoformat(), '2026-11-05T13:00:00+00:00')

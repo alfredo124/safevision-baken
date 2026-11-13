@@ -11,7 +11,7 @@ from sqlalchemy import create_engine, inspect
 from app.core import database
 from app.core.security import create_access_token
 from app.main import app
-from app.modules.reglas_lab.compliance import ComplianceEngine, EquipmentRule
+from app.modules.reglas_lab.cumplimiento.motor import ComplianceEngine, EquipmentRule
 from app.modules.reglas_lab.models import WorkshopEquipmentRule
 from tests.test_compliance_pose import posed
 from tests.test_compliance import run

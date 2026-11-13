@@ -12,9 +12,9 @@ from app.main import app
 from app.modules.ai_vision.models import Camera
 from app.modules.auth_db.models import User, UserRole
 from app.modules.reglas_lab import models
-from app.modules.reglas_lab.compliance import ViolationEvent
-from app.modules.reglas_lab.incident_service import record_system_fault
-from app.modules.reglas_lab.services import snapshot_incident_names
+from app.modules.reglas_lab.cumplimiento.motor import ViolationEvent
+from app.modules.reglas_lab.incidencias.servicio import record_system_fault
+from app.modules.reglas_lab.inicializacion import snapshot_incident_names
 
 
 def headers(username, role):

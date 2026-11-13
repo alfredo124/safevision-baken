@@ -16,7 +16,7 @@ from app.modules.ai_vision.capture import save_incident_capture
 from app.modules.ai_vision.models import Camera
 from app.modules.ai_vision.services import video_processor as default_processor
 from app.modules.reglas_lab import models
-from app.modules.reglas_lab.incident_service import create_system_incident, rules_for_camera
+from app.modules.reglas_lab.incidencias.servicio import create_system_incident, rules_for_camera
 
 logger = logging.getLogger(__name__)
 

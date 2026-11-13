@@ -18,10 +18,10 @@ from app.main import app
 from app.modules.ai_vision import capture
 from app.modules.ai_vision.models import Camera
 from app.modules.reglas_lab import models
-from app.modules.reglas_lab.compliance import (
+from app.modules.reglas_lab.cumplimiento.motor import (
     DETAIL_COAT_OPEN, ComplianceEngine, ComplianceState, EquipmentDetection, EquipmentRule,
 )
-from app.modules.reglas_lab.incident_service import incident_faults, record_system_fault
+from app.modules.reglas_lab.incidencias.servicio import incident_faults, record_system_fault
 from tests.test_compliance import run
 from tests.test_compliance_pose import BOX, posed, torso_coat
 
@@ -107,7 +107,7 @@ class OpenCoatIncidentTest(unittest.TestCase):
             self.camera_id, self.workshop_id = camera.id, workshop.id
 
     def _record(self, severity, detail):
-        from app.modules.reglas_lab.compliance import ViolationEvent
+        from app.modules.reglas_lab.cumplimiento.motor import ViolationEvent
         event = ViolationEvent(1, 'chaleco', 'lab_coat', severity, 10.0, 2.0, BOX, 0.0,
                                rule_code='RLQ-2.1', detail=detail)
         with database.SessionLocal() as db:

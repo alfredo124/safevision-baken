@@ -5,7 +5,7 @@ from app.modules.auth_db.router import router as auth_router
 from app.modules.ai_vision.router import router as ai_vision_router
 from app.modules.ai_vision.router_cameras import router as ai_vision_cameras_router
 from app.modules.reglas_lab.router import router as reglas_lab_router
-from app.modules.reglas_lab.services import initialize_reglas_lab
+from app.modules.reglas_lab.inicializacion import initialize_reglas_lab
 
 app = FastAPI(title="SafeVision API")
 

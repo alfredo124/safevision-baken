@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 from app.core import events
 from app.modules.ai_vision.models import Camera
 from app.modules.reglas_lab import models
-from app.modules.reglas_lab.compliance import DETAIL_COAT_OPEN, DETAIL_GOGGLES_OFF, EquipmentRule, ViolationEvent
+from app.modules.reglas_lab.cumplimiento.motor import DETAIL_COAT_OPEN, DETAIL_GOGGLES_OFF, EquipmentRule, ViolationEvent
 
 # Texto de una falta según su detalle: el EPP falta o está mal puesto.
 DETAIL_TEXT = {DETAIL_COAT_OPEN: 'abierta (sin abotonar)', DETAIL_GOGGLES_OFF: 'fuera de los ojos'}
@@ -150,7 +150,7 @@ def record_system_fault(
     """
     now = datetime.now(timezone.utc)
     window = GROUP_SECONDS if group_seconds is None else group_seconds
-    from app.modules.reglas_lab.sesiones import open_session_for
+    from app.modules.reglas_lab.practicas.sesiones import open_session_for
     session = open_session_for(db, workshop_id)  # práctica en curso del laboratorio
     session_id = session.id if session else None
     incident = _open_alert_for(db, camera_id, event, now, window, session_id)

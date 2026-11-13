@@ -216,10 +216,23 @@ no lo uses sobre datos que quieras conservar.
 
 ## Estructura del Backend (Resumen)
 - `app/main.py`: aplicación FastAPI (rutas y CORS).
-- `app/core/`: configuración por variables de entorno, seguridad (JWT) y conexión a la base SQLite.
-- `app/modules/auth_db/`: usuarios, roles e inicio de sesión.
+- `app/core/`: configuración por variables de entorno, seguridad (JWT), conexión a la base SQLite, permisos y bitácora (`bitacora.py`).
+- `app/modules/auth_db/`: usuarios, roles, inicio de sesión y consulta de la bitácora (`GET /modules/auth_db/activity`, solo administrador).
 - `app/modules/ai_vision/`: cámaras, captura de video, detectores (pose + `best.pt`), capturas enmascaradas.
-- `app/modules/reglas_lab/`: talleres, reglas, motor de cumplimiento (`compliance.py`), monitoreo e incidencias.
+- `app/modules/reglas_lab/`: cumplimiento de EPP en los laboratorios, dividido en submódulos con un solo `models.py`:
+
+  ```
+  reglas_lab/
+  ├── models.py          tablas de todo el módulo (compartidas)
+  ├── comun.py           sesión de BD, permisos sobre un laboratorio, fechas UTC, tipos comunes
+  ├── inicializacion.py  crea tablas, añade columnas nuevas y carga el catálogo inicial al arrancar
+  ├── router.py          une los routers de los submódulos (/modules/reglas_lab)
+  ├── cumplimiento/      motor.py (¿lleva el EPP cada persona?) y overlay.py (datos para dibujar en el video)
+  ├── laboratorios/      laboratorios, locales, catálogo de EPP, reglas exigidas y reglamentos
+  ├── practicas/         iniciar/finalizar práctica: monitoreo.py (análisis) y sesiones.py (lo guardado)
+  ├── incidencias/       alertas: servicio.py (registro automático y agrupación) y validación
+  └── reportes/          reporte SST (reporte.py), emisión y verificación
+  ```
 - `tools/`: utilidades (crear administrador, aplicar reglamento, grabar y evaluar detecciones de videos).
 - `tests/`: pruebas automáticas.
 
@@ -230,8 +243,8 @@ Rutas principales, protegidas con JWT:
 - `GET /modules/reglas_lab/configuration`: talleres, catálogo EPP y cámaras disponibles.
 - `POST /modules/reglas_lab/workshops` y `PUT /modules/reglas_lab/workshops/{id}/configuration`: crear talleres y guardar cámaras/EPP requeridos.
 - `POST /modules/reglas_lab/equipment`: ampliar el catálogo EPP (solo administrador).
-- `GET/POST /modules/reglas_lab/incidents`: consultar y registrar incidencias.
-- `PATCH /modules/reglas_lab/incidents/{id}/status`: actualizar su estado.
+- `GET/POST /modules/reglas_lab/incidents`: consultar (filtros `start`/`end` con zona horaria, `session_id`, `limit`) y registrar incidencias.
+- `POST /modules/reglas_lab/incidents/{id}/review`: confirmar (con la acción tomada) o descartar una alerta. Es la única forma de cambiar su estado.
 
 Cada regla de un taller puede guardar su código y gravedad según el reglamento (`rules` en `PUT .../configuration`); si faltan, se usan `missing_code` e `impact` del catálogo. Los EPP sin detector (`model_class` vacío), como botas o vestimenta, se marcan como verificación manual y nunca generan alertas.
 
@@ -277,6 +290,11 @@ python tools/aplicar_reglamento.py quimica-v3.1 --taller 2 --confirmar
   tiempo medio de respuesta), resultados por laboratorio y bitácora (hasta 300 filas). Las fechas llevan zona horaria: la
   web envía el inicio y el fin del día en su hora local. El encargado solo obtiene su laboratorio.
 - Incluye una huella SHA-256 del contenido (sin la hora de emisión): si una alerta del periodo cambia, la huella cambia.
-  La lógica está en `app/modules/reglas_lab/reporte.py`.
+  La lógica está en `app/modules/reglas_lab/reportes/reporte.py`.
+- El EPP exigido de cada laboratorio sale de la copia de reglas que guarda cada práctica (lo que se exigía entonces); si en
+  el periodo no hubo prácticas con copia, se usa la configuración actual (`required_equipment_source = ACTUAL`).
+- `POST /modules/reglas_lab/reports`: emite el reporte (la web lo hace al abrir el documento). Queda guardado en `lab_reports`
+  con su código, periodo, laboratorios, responsable SST y huella. `GET /reports` los lista y `GET /reports/{code}/verify`
+  lo recalcula y dice si la huella sigue coincidiendo.
 
 Las incidencias admiten clase/confianza YOLO y `bounding_box` (`[x1, y1, x2, y2]`) con dimensiones del frame. Estos campos quedan persistidos para que la interfaz pueda recuperar los datos al dibujar cajas propias. Las cámaras con incidencias históricas no se pueden eliminar.

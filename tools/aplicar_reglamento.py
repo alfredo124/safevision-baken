@@ -16,8 +16,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app.core.database import SessionLocal
 from app.main import app  # noqa: F401  registra todos los modelos
 from app.modules.reglas_lab.models import SafetyEquipment, Workshop, WorkshopEquipmentRule
-from app.modules.reglas_lab.reglamentos import REGLAMENTOS
-from app.modules.reglas_lab.services import initialize_reglas_lab
+from app.modules.reglas_lab.laboratorios.reglamentos import REGLAMENTOS
+from app.modules.reglas_lab.inicializacion import initialize_reglas_lab
 
 
 def apply(reglamento_id: str, workshop_id: int, confirm: bool) -> list[str]:

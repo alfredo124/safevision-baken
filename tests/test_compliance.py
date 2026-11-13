@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from app.modules.reglas_lab.compliance import (
+from app.modules.reglas_lab.cumplimiento.motor import (
     ComplianceConfig, ComplianceEngine, ComplianceState, EquipmentDetection, EquipmentRule,
     FrameObservation, PersonDetection, observation_from_record,
 )

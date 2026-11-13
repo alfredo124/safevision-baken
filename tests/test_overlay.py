@@ -8,10 +8,10 @@ from fastapi.testclient import TestClient
 
 from app.core.security import create_access_token
 from app.main import app
-from app.modules.reglas_lab.compliance import (
+from app.modules.reglas_lab.cumplimiento.motor import (
     ComplianceEngine, ComplianceState, EquipmentRule, FrameObservation, PersonDetection,
 )
-from app.modules.reglas_lab.overlay import build_overlay_message
+from app.modules.reglas_lab.cumplimiento.overlay import build_overlay_message
 from tests.test_compliance_pose import BOX, posed, skeleton, wrist_glove, face_goggles
 from tests.test_compliance import run
 from tests.test_monitoring import FAST, make_processor, wait_until
