@@ -3,39 +3,129 @@
 ## Descripción
 SafeVision es un prototipo académico de apoyo al personal de laboratorio. Durante una práctica activa verifica, mediante visión artificial, la **presencia visible** del Equipo de Protección Personal (EPP) exigido en laboratorios de Química y Física y envía alertas al encargado, que confirma o descarta cada una. No graba video y no reemplaza la supervisión humana.
 
-## Guía rápida de instalación (para el equipo)
+## Guía de instalación paso a paso (en otra PC)
 
-Probado en Windows 10 con Python 3.14 y Node.js 24, sin GPU. Los dos repositorios van en la misma carpeta:
+Esta guía lleva SafeVision a una PC nueva con Windows 10 u 11, desde cero, hasta tenerlo funcionando. Se probó
+clonando los repositorios desde GitHub en una carpeta vacía, con Python 3.14 y Node.js 24, sin GPU.
+
+SafeVision tiene **dos partes** y las dos tienen que estar en marcha a la vez:
+
+| Parte | Carpeta | Qué hace | Puerto |
+|---|---|---|---|
+| Backend | `safevison_baken` (este repositorio) | Analiza el video con YOLO, aplica las reglas y guarda todo en la base | 8000 |
+| Frontend | `safevision-web` | La página web que se abre en el navegador | 5173 |
+
+### Paso 0. Qué necesitas
+- PC con **Windows 10 u 11** de 64 bits, 8 GB de RAM o más y unos **5 GB libres** en el disco.
+- **Internet** durante la instalación: se descargan unas librerías de ~1 GB (PyTorch y otras).
+  Después funciona sin internet en la red local.
+- Una cámara (webcam del PC, cámara IP o un celular) o un video `.mp4` para probar. Es opcional.
+- Unos **30 minutos** la primera vez, sobre todo por las descargas.
+
+### Paso 1. Instalar los programas necesarios (una vez por PC)
+Instala estos tres programas. Si ya los tienes, comprueba que la versión sea suficiente (paso 1.4).
+
+1. **Python 3.12 o superior** (se recomienda 3.13 o 3.14): https://www.python.org/downloads/
+   - En la primera pantalla del instalador marca **"Add python.exe to PATH"** y después *Install Now*.
+   - Python 3.11 o anterior **no sirve**: algunas librerías (por ejemplo `numpy`) exigen 3.12 o superior.
+2. **Node.js, versión LTS** (22 o 24): https://nodejs.org. Acepta las opciones por defecto.
+   Vite exige como mínimo Node.js 20.19 o 22.12.
+3. **Git**: https://git-scm.com/download/win. Acepta las opciones por defecto.
+4. **Comprueba** que quedaron instalados. Abre una ventana **nueva** de PowerShell (menú Inicio, escribe
+   *PowerShell*) y ejecuta:
+   ```powershell
+   python --version     # debe decir Python 3.12.x o superior
+   node --version       # debe decir v22.x o v24.x
+   npm --version
+   git --version
+   ```
+   Si alguno dice *"no se reconoce como comando"*, cierra PowerShell y ábrelo de nuevo. Si sigue igual, reinstala
+   ese programa. En el caso de Python, marca *Add to PATH*.
+   Si `python` abre la Microsoft Store, desactiva el alias en *Configuración → Aplicaciones → Configuración
+   avanzada de aplicaciones → Alias de ejecución de aplicaciones* (apaga *python.exe* y *python3.exe*).
+
+### Paso 2. Descargar el proyecto
+Los dos repositorios deben quedar **en la misma carpeta** y con estos **nombres exactos** de carpeta: la web en
+modo HTTPS busca el certificado en `..\safevison_baken\certs`.
 
 ```text
 C:\git\universidad\
-├── safevison_baken\   (este repositorio: backend)
+├── safevison_baken\   (backend, este repositorio)
 └── safevision-web\    (frontend)
 ```
 
-### 1. Requisitos (una vez por PC)
-- **Python 3.11 o superior** (https://www.python.org). Al instalar, marca *Add python.exe to PATH*.
-- **Node.js 20 o superior, versión LTS** (https://nodejs.org).
-- **Git**, para clonar los dos repositorios:
-  ```powershell
-  git clone https://github.com/alfredo124/safevision-baken.git safevison_baken
-  git clone https://github.com/alfredo124/safevision-web.git safevision-web
-  ```
-- Internet la primera vez: se descargan las librerías (PyTorch pesa ~1 GB) y el modelo `yolo11n-pose.pt`.
+En PowerShell:
+```powershell
+mkdir C:\git\universidad
+cd C:\git\universidad
+git clone https://github.com/alfredo124/safevision-baken.git safevison_baken
+git clone https://github.com/alfredo124/safevision-web.git safevision-web
+```
+Fíjate en que el repositorio del backend se llama `safevision-baken` en GitHub, pero la carpeta debe ser
+`safevison_baken`. El último argumento del `git clone` se encarga de eso.
 
-### 2. Instalar (una vez)
-1. **Backend:** doble clic en `safevison_baken\instalar.bat`. Crea `.venv`, instala `requirements.txt` y pide la
-   contraseña del usuario `admin`; no se ve al escribirla.
-2. **Frontend:** doble clic en `safevision-web\instalar.bat`, que ejecuta `npm install`.
+*Sin Git:* en cada página de GitHub pulsa **Code → Download ZIP**, descomprime y renombra las carpetas
+exactamente como arriba (quita el `-main` que añade GitHub).
 
-### 3. Arrancar (cada vez)
-1. Doble clic en `safevison_baken\iniciar.bat`: backend en el puerto 8000. Deja la ventana abierta.
-2. Doble clic en `safevision-web\iniciar.bat`: frontend en el puerto 5173. Deja la ventana abierta.
-3. Abre http://localhost:5173 y entra con `admin`.
+### Paso 3. Instalar el backend (una vez)
+1. Abre la carpeta `C:\git\universidad\safevison_baken` en el Explorador de archivos.
+2. Haz doble clic en **`instalar.bat`**. Se abre una ventana negra que:
+   - comprueba que Python sea 3.12 o superior;
+   - crea un entorno virtual en `.venv` (las librerías quedan dentro del proyecto, no en todo el PC);
+   - instala `requirements.txt`, lo que tarda **10-20 minutos** la primera vez (PyTorch pesa ~1 GB);
+   - crea el usuario administrador **`admin`** y te pide su **contraseña** (mínimo 6 caracteres).
+     **Al escribirla no se ve nada**: es normal. Escríbela y pulsa Enter. Anótala: la necesitarás para entrar.
+3. Al terminar dice `Listo. Para arrancar el backend: iniciar.bat`. Pulsa una tecla para cerrar.
 
-La primera vez que se inicia una práctica, Ultralytics descarga `yolo11n-pose.pt` (6 MB).
+Si la ventana muestra `[ERROR]`, revisa *Solución de problemas*, al final de esta guía.
+Si cerraste la ventana sin crear la contraseña, no pasa nada: la web lo pedirá al abrirla (paso 5).
 
-### 4. Usarlo desde otros equipos o el celular (misma red)
+### Paso 4. Instalar el frontend (una vez)
+1. Abre la carpeta `C:\git\universidad\safevision-web`.
+2. Haz doble clic en **`instalar.bat`**. Ejecuta `npm install` (1-3 minutos) y termina con `Listo`.
+
+### Paso 5. Arrancar SafeVision (cada vez que lo uses)
+Siempre en este orden, y **deja las dos ventanas abiertas** mientras uses el sistema:
+
+1. Doble clic en **`safevison_baken\iniciar.bat`**. Espera a ver
+   `Application startup complete` y `Uvicorn running on http://0.0.0.0:8000`.
+   Si Windows pregunta por el **Firewall**, pulsa *Permitir acceso*.
+2. Doble clic en **`safevision-web\iniciar.bat`**. Espera a ver `Local: http://localhost:5173/` y una línea
+   `Network: http://192.168.x.x:5173/` (esa dirección sirve para otros equipos; paso 7).
+3. Abre el navegador (Chrome, Edge o Firefox) en **http://localhost:5173**.
+4. Entra con el usuario **`admin`** y la contraseña del paso 3.
+   - Si no creaste la contraseña en el paso 3, la web abre *Configuración inicial* para crear el primer
+     administrador.
+
+**Comprobación rápida:** http://localhost:8000/health debe mostrar `{"status":"ok"}`.
+
+**Para apagarlo:** en cada ventana pulsa `Ctrl + C` (y `S` si pregunta) o simplemente ciérrala.
+Los datos quedan guardados en `safevison_baken\safevision.db`.
+
+### Paso 6. Primer uso de la aplicación
+1. **Agregar una cámara:** en *Monitoreo en vivo* elige una opción:
+   - *Detectar cámaras del PC servidor*: la webcam o cámara USB del PC donde corre el backend;
+   - *Agregar nueva cámara* (el botón **+**): subir un video `.mp4` (se guarda en `videos\cameras\`) o una URL RTSP/HTTP de una cámara IP;
+   - *Usar la cámara de este dispositivo*: un celular o laptop como cámara (necesita HTTPS, paso 7b).
+2. **Configurar las reglas:** en *Configurar reglas* elige el taller (por ejemplo *Laboratorio de Química*),
+   asígnale la cámara con **Añadir Cámara** y marca el EPP obligatorio (guantes, lentes, bata...). Los cambios se
+   guardan solos al marcarlos.
+3. **Iniciar la práctica:** en el mismo taller pulsa **Iniciar práctica**.
+   - La primera vez se descarga el modelo `yolo11n-pose.pt` (6 MB) y se mide la velocidad del PC: tarda unos
+     segundos más.
+   - El análisis sigue aunque cierres la página; solo se detiene con **Finalizar práctica**.
+4. **Validar alertas:** cuando alguien no lleva el EPP aparece una alerta (abajo a la derecha en el PC, arriba en
+   el celular). Revisa las evidencias y pulsa *Confirmar: corregido*, *Confirmar: retirado* o *Descartar*.
+5. **Consultar y reportar:** *Historial de incidencias* (filtros por fecha y práctica), *Reportes SST* (emitir el
+   documento y guardarlo en PDF), *Bitácora* (quién hizo qué) y *Usuarios y locales* (crear encargados por laboratorio).
+
+Opcional, para usar los códigos del reglamento de Química: con el backend detenido, abre PowerShell en
+`safevison_baken` y ejecuta:
+```powershell
+.venv\Scripts\python tools\aplicar_reglamento.py quimica-v3.1 --taller 2 --confirmar
+```
+
+### Paso 7. Usarlo desde otros equipos o el celular (misma red)
 Todos los equipos (el PC servidor, otros PC y los celulares) deben estar en **la misma red**. Hay dos casos:
 
 | | Caso A: Wi-Fi de casa o del laboratorio | Caso B: datos compartidos del celular |
@@ -50,17 +140,18 @@ Todos los equipos (el PC servidor, otros PC y los celulares) deben estar en **la
    y copia su **Dirección IPv4**. También la muestra `iniciar.bat` del frontend en la línea *Network*.
 3. No uses `127.0.0.1` (solo sirve en el propio PC), ni `169.254.x.x` (sin red), ni las de adaptadores virtuales
    (*vEthernet*, *VirtualBox*, *WSL*).
-4. En los demás equipos abre `http://ESA-IP:5173` (o `https://ESA-IP:5173` con HTTPS, sección 4b). La web encuentra
+4. En los demás equipos abre `http://ESA-IP:5173` (o `https://ESA-IP:5173` con HTTPS, paso 7b). La web encuentra
    sola el backend en la misma IP, puerto 8000.
 
-**Una sola vez por PC servidor**, en PowerShell como administrador (abre los puertos también en redes "públicas",
-que es como Windows suele clasificar el punto de acceso de un celular):
+**Una sola vez por PC servidor**, en PowerShell **como administrador** (clic derecho en PowerShell → *Ejecutar como
+administrador*). Esto abre los puertos también en redes "públicas", que es como Windows suele clasificar el punto
+de acceso de un celular:
 ```powershell
 New-NetFirewallRule -DisplayName "SafeVision" -Direction Inbound -Protocol TCP -LocalPort 8000,5173 -Action Allow -Profile Private,Public
 ```
 
 **Al cambiar de red** (de A a B o al revés) la IP cambia: cierra las ventanas del backend y del frontend y vuelve a
-abrir los `.bat` (primero el backend). Con HTTPS el certificado se renueva solo (sección 4b).
+abrir los `.bat` (primero el backend). Con HTTPS el certificado se renueva solo (paso 7b).
 
 Notas del caso B:
 - El video entre los equipos va por la red local del celular, no por internet: SafeVision no gasta datos móviles.
@@ -68,16 +159,17 @@ Notas del caso B:
   exigen tener los datos activos para encender el punto de acceso.
 - Si los equipos no se ven entre sí, desactiva el *aislamiento de clientes* del punto de acceso (si la opción
   existe) o prueba con otro celular.
-- El celular que comparte la red también puede usar SafeVision o ser la cámara; se calienta y gasta batería:
-  mejor conectado al cargador.
+- El celular que comparte la red también puede usar SafeVision o ser la cámara. Se calienta y gasta batería:
+  mejor tenerlo conectado al cargador.
 
 La **cámara del navegador** de otro equipo o del celular necesita HTTPS: ver la sección siguiente.
 
-### 4b. Usar la cámara del celular u otro equipo (HTTPS)
+### Paso 7b. Usar la cámara del celular u otro equipo (HTTPS)
 El navegador solo permite usar la cámara con HTTPS (o en `localhost`). Para la red local:
-1. Arranca con HTTPS: `safevison_baken\iniciar_https.bat` y después `safevision-web\iniciar_https.bat`.
-   La primera vez se crea el certificado en `safevison_baken\certs\` (fuera de Git; contiene claves privadas).
-2. En el celular abre la IP del PC servidor (sección 4) con **https**, por ejemplo `https://192.168.1.9:5173`.
+1. Arranca con HTTPS **en lugar de** los `iniciar.bat`: primero `safevison_baken\iniciar_https.bat` y después
+   `safevision-web\iniciar_https.bat`. La primera vez se crea el certificado en `safevison_baken\certs\` (fuera de
+   Git; contiene claves privadas).
+2. En el celular abre la IP del PC servidor (paso 7) con **https**, por ejemplo `https://192.168.1.9:5173`.
 3. El navegador avisará de que la conexión no es privada. Dos opciones:
    - **Rápida:** acepta la advertencia en `https://IP:5173` y también una vez en `https://IP:8000/health`
      (el backend es otra dirección y también hay que aceptarla).
@@ -87,7 +179,7 @@ El navegador solo permite usar la cámara con HTTPS (o en `localhost`). Para la 
      *General → Información → Ajustes de confianza de certificados*.
 4. Entra en **Estación de cámara**, crea una "cámara de navegador", elige la cámara del dispositivo y pulsa
    *Iniciar transmisión*. La vista local va a la velocidad de la cámara; al servidor solo se envían 2-5 imágenes
-   por segundo. Asigna esa cámara a un taller en *Configuración de reglas* para analizarla en la práctica.
+   por segundo. Asigna esa cámara a un taller en *Configurar reglas* para analizarla en la práctica.
 5. La transmisión **sigue aunque vayas a Monitoreo u otra página** del mismo navegador: arriba se ve una barra
    verde con el botón *Detener*. Se corta al pulsar *Detener*, cerrar sesión o cerrar/recargar la página.
    Mantén el navegador abierto y la pantalla encendida: en segundo plano puede dejar de enviar. Si la estación se
@@ -97,13 +189,62 @@ Si cambias de red (otro Wi-Fi o los datos del celular), cierra y vuelve a abrir 
 después el del frontend: el backend detecta la IP nueva y renueva el certificado con la autoridad de siempre
 (no hay que reinstalarla en el celular). Las IP anteriores se conservan, así que volver a la red de antes no lo renueva.
 
-### 5. Primeros pasos en la aplicación
-1. **Monitoreo → Agregar nueva cámara**: carga un video `.mp4` o indica una URL RTSP. Los videos se guardan en
-   `videos\cameras\` y no se suben a Git.
-2. **Configuración de reglas**: elige el taller, asígnale la cámara y marca los EPP (guantes, lentes, bata).
-   Para usar los códigos del reglamento de Química, con el backend detenido y el `.venv` activado:
-   `python tools\aplicar_reglamento.py quimica-v3.1 --taller 2 --confirmar`.
-3. Pulsa **Iniciar práctica**. Las alertas aparecen en cualquier página: abajo a la derecha en el PC y, en el celular, como una barra plegable bajo la cabecera.
+### Paso 8. Actualizar a una versión nueva
+Con las dos ventanas cerradas, en PowerShell:
+```powershell
+cd C:\git\universidad\safevison_baken
+git pull
+cd ..\safevision-web
+git pull
+```
+Después vuelve a ejecutar `instalar.bat` en las dos carpetas: instala solo lo que haya cambiado y no toca la base
+de datos. Si vuelve a pedir la contraseña de `admin`, escribe cualquiera de 6 caracteres o más: como `admin` ya
+existe, **no se cambia** (la ventana dice *"El usuario admin ya existe; no se modificó"*). Luego arranca como en el
+paso 5.
+
+### Paso 9. Llevar los datos de una PC a otra
+La base de datos, los videos y las capturas **no están en Git**: cada PC empieza vacía. Para llevar los datos,
+con el backend detenido en las dos PC, copia de `safevison_baken\` a la misma carpeta de la PC nueva:
+- `safevision.db` (usuarios, laboratorios, reglas, incidencias, reportes);
+- `videos\cameras\` (las cámaras de video subidas);
+- `capturas\` (las evidencias de las alertas).
+
+### Resumen de comandos (equivalentes a los .bat)
+Para quien prefiera la consola. Backend, en PowerShell dentro de `safevison_baken`:
+```powershell
+python -m venv .venv
+.venv\Scripts\python -m pip install -r requirements.txt
+.venv\Scripts\python tools\create_admin.py admin --full-name "Administrador Sistema"
+.venv\Scripts\python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+Frontend, en otra ventana dentro de `safevision-web`:
+```powershell
+npm install
+npm run dev:lan
+```
+Si prefieres activar el entorno (`.\.venv\Scripts\Activate.ps1`) y PowerShell lo bloquea, usa
+`.venv\Scripts\activate.bat` desde `cmd`, o ejecuta una vez
+`Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`.
+
+### Paso 10. Solución de problemas
+| Qué pasa | Qué hacer |
+|---|---|
+| `instalar.bat` dice *No se encontró Python* o `python` no se reconoce | Reinstala Python marcando *Add python.exe to PATH* y abre una ventana nueva. |
+| `python` abre la Microsoft Store | Desactiva los *Alias de ejecución de aplicaciones* de Python (paso 1.4). |
+| `instalar.bat` dice que la versión de Python es antigua, o `pip` falla con `No matching distribution found for numpy==...` | Instala Python 3.12 o superior, borra la carpeta `.venv` y vuelve a ejecutar `instalar.bat`. |
+| `pip` se corta a mitad de la descarga | Es la conexión: vuelve a ejecutar `instalar.bat`; lo que ya se instaló no se descarga de nuevo. |
+| `instalar.bat` del frontend dice *No se encontró Node.js* o la versión es antigua | Instala Node.js LTS (22 o 24) y abre una ventana nueva. |
+| `ModuleNotFoundError: No module named 'app'` | Ejecuta los comandos desde la carpeta `safevison_baken` (los `.bat` ya lo hacen). |
+| La web dice *Error al conectar con el servidor* | La ventana del backend (`iniciar.bat`) debe seguir abierta. Desde otro equipo: regla del firewall (paso 7). |
+| Olvidé la contraseña de `admin` | Con el backend detenido: `.venv\Scripts\python tools\create_admin.py admin2` crea otro administrador; entra con él y cambia la contraseña de `admin` en *Usuarios y locales*. |
+| El celular no abre la página | Misma red Wi-Fi, regla del firewall y aislamiento de clientes del punto de acceso (paso 7). |
+| La cámara del celular no aparece o el navegador no la permite | Hace falta HTTPS: usa los `iniciar_https.bat` (paso 7b). |
+| `iniciar_https.bat` del frontend dice *No se encontró el certificado* | Arranca antes `safevison_baken\iniciar_https.bat`, y revisa que las carpetas se llamen exactamente como en el paso 2. |
+| Una cámara de video no carga en otra PC | Copia el archivo a `videos\cameras\` (paso 9) o vuelve a subir el video. |
+| *Puerto ocupado* o `address already in use` | Ya hay otra ventana del backend o del frontend abierta: ciérrala, o el proceso que use el puerto 8000 o 5173. |
+| El análisis va lento | Normal en PC sin GPU con varias cámaras: ver *Rendimiento* y *PC con GPU NVIDIA* más abajo. |
+
+## Configuración avanzada
 
 ### Configuración opcional
 Las variables están documentadas en `.env.example` y se activan quitando `rem` en `iniciar.bat`. Las más útiles:
@@ -156,16 +297,8 @@ python -m unittest discover -s tests -t .
 Usan una base SQLite temporal y no modifican `safevision.db`. La prueba del umbral con YOLO real se omite si faltan
 `best.pt` o `videos\videoplayback.mp4`.
 
-## Comandos manuales (equivalentes a los .bat)
-```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1      # si PowerShell lo bloquea, usa .venv\Scripts\activate.bat desde cmd
-python -m pip install -r requirements.txt
-python tools\create_admin.py admin --full-name "Administrador Sistema"
-python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
-```
-Para comprobar que responde: http://localhost:8000/health debe devolver `{"status":"ok"}`. La documentación de la
-API está en http://localhost:8000/docs.
+## API
+La documentación interactiva de la API está en http://localhost:8000/docs (con el backend arrancado).
 
 ### Usuarios
 No hay registro público: solo un administrador autenticado crea (`POST /modules/auth_db/users`) o modifica
@@ -186,15 +319,6 @@ no lo uses sobre datos que quieras conservar.
   la cámara ampliada usa video continuo, para no agotar las ~6 conexiones por servidor del navegador.
 - Una web en Vercel (HTTPS) **no** puede usar este backend por `http://`, porque el navegador bloquea el contenido
   mixto. Haría falta un túnel HTTPS; se deja para cuando la seguridad esté cerrada.
-
-## Solución de problemas
-- *No se encontró Python* o `python` no reconocido: reinstala Python marcando *Add to PATH*.
-- `ModuleNotFoundError: No module named 'app'`: ejecuta desde la carpeta `safevison_baken`.
-- La web dice *Error al conectar con el servidor*: revisa que la ventana de `iniciar.bat` del backend siga abierta y,
-  si es otro equipo, la regla del firewall.
-- El celular no abre la página: misma red Wi-Fi, regla del firewall y aislamiento de clientes del punto de acceso.
-- Una cámara de video no carga en otro PC: copia el archivo a `videos\cameras\` o vuelve a subirlo.
-- Puerto ocupado: cierra la otra ventana de `iniciar.bat` o el proceso que use el puerto 8000 o 5173.
 
 ## Objetivos
 - Automatizar la detección de EPP mediante el procesamiento de video.
